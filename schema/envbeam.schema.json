@@ -1,0 +1,327 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://envbeam.dev/schema/envbeam.schema.json",
+  "title": "envbeam workspace config (.envbeam.yaml)",
+  "$ref": "#/definitions/EnvbeamWorkspaceConfig",
+  "definitions": {
+    "EnvbeamWorkspaceConfig": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1,
+          "description": "Config schema version."
+        },
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable workspace name."
+        },
+        "git": {
+          "type": "object",
+          "properties": {
+            "identity": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9.+-]*:[a-z0-9][a-z0-9._-]*$",
+              "description": "Reference to a named identity defined in global config (~/.envbeam/config.yaml)."
+            },
+            "remote": {
+              "type": "string",
+              "default": "origin",
+              "description": "Git remote name."
+            },
+            "branch": {
+              "type": "string",
+              "default": "current",
+              "description": "Branch to track, or \"current\" to follow the checked-out branch."
+            },
+            "autopush": {
+              "type": "boolean",
+              "default": true,
+              "description": "pause pushes the branch."
+            },
+            "autopull": {
+              "type": "string",
+              "enum": [
+                "ff-only",
+                "off"
+              ],
+              "default": "ff-only",
+              "description": "resume pull policy: ff-only fast-forwards a clean tree; off skips."
+            }
+          },
+          "additionalProperties": false
+        },
+        "secrets": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "description": "Secrets plugin name, e.g. doppler | onepassword."
+            },
+            "identity": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9.+-]*:[a-z0-9][a-z0-9._-]*$",
+              "description": "Reference to a named identity defined in global config (~/.envbeam/config.yaml)."
+            },
+            "project": {
+              "type": "string",
+              "description": "Provider-specific project reference (no secret values)."
+            },
+            "config": {
+              "type": "string",
+              "description": "Provider-specific config/environment name."
+            },
+            "vault": {
+              "type": "string",
+              "description": "1Password vault name (onepassword provider)."
+            },
+            "item": {
+              "type": "string",
+              "description": "1Password item name holding the env vars."
+            },
+            "output": {
+              "type": "string",
+              "enum": [
+                "dotenv",
+                "run-wrapper"
+              ],
+              "default": "dotenv",
+              "description": "How secrets are materialized locally."
+            },
+            "dotenvPath": {
+              "type": "string",
+              "default": ".env",
+              "description": "Path (relative to workspace) for the gitignored dotenv file."
+            }
+          },
+          "required": [
+            "provider"
+          ],
+          "additionalProperties": false
+        },
+        "container": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "devcontainer",
+                "compose",
+                "none"
+              ],
+              "description": "Container orchestration mode."
+            },
+            "composeFile": {
+              "type": "string",
+              "description": "Path to docker-compose file (compose mode)."
+            },
+            "service": {
+              "type": "string",
+              "description": "Primary compose service to bring up."
+            },
+            "upOnResume": {
+              "type": "boolean",
+              "default": true
+            },
+            "stopOnPause": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "database": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "description": "Database plugin name: postgres | mysql."
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "migrations-only",
+                "snapshot"
+              ],
+              "default": "migrations-only",
+              "description": "migrations-only (fast, default) | snapshot (carry data)."
+            },
+            "restore": {
+              "type": "string",
+              "enum": [
+                "prompt",
+                "auto",
+                "off"
+              ],
+              "default": "prompt",
+              "description": "On resume, how to handle a newer snapshot."
+            },
+            "connection": {
+              "type": "string",
+              "default": "from-secrets",
+              "description": "\"from-secrets\" resolves host/creds from loaded secrets, or an inline env-var ref."
+            },
+            "service": {
+              "type": "string",
+              "description": "Container service to dump/restore against."
+            },
+            "migrate": {
+              "type": "boolean",
+              "default": true,
+              "description": "Apply pending migrations (both modes)."
+            },
+            "migrateCommand": {
+              "type": "string",
+              "description": "Stack-specific migrate command; auto-detectable."
+            },
+            "changeTables": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Tables watched for change-detection (defaults to snapshot include set)."
+            },
+            "snapshot": {
+              "type": "object",
+              "properties": {
+                "dataOnly": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Dump data only; schema comes from migrations."
+                },
+                "compress": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "tables": {
+                  "type": "object",
+                  "properties": {
+                    "include": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "default": []
+                    },
+                    "exclude": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "default": []
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "changeDetection": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Auto-prompt a snapshot on pause only if configured tables changed."
+                }
+              },
+              "additionalProperties": false
+            },
+            "sync": {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "type": "string",
+                  "enum": [
+                    "syncthing",
+                    "s3",
+                    "local-folder"
+                  ],
+                  "description": "Where DB snapshots live."
+                },
+                "identity": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9.+-]*:[a-z0-9][a-z0-9._-]*$",
+                  "description": "Reference to a named identity defined in global config (~/.envbeam/config.yaml)."
+                },
+                "path": {
+                  "type": "string",
+                  "description": "Folder path for syncthing/local-folder targets."
+                },
+                "bucket": {
+                  "type": "string",
+                  "description": "S3 bucket name (s3 target)."
+                },
+                "prefix": {
+                  "type": "string",
+                  "description": "Key prefix within the bucket/folder."
+                },
+                "region": {
+                  "type": "string",
+                  "description": "S3 region (s3 target)."
+                },
+                "encrypt": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "age",
+                    "gpg"
+                  ],
+                  "default": "none",
+                  "description": "At-rest encryption of snapshot files."
+                },
+                "recipient": {
+                  "type": "string",
+                  "description": "age/gpg recipient (public key / key id)."
+                },
+                "maxSizeMB": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "default": 500,
+                  "description": "Warn/abort above this dump size."
+                },
+                "keep": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 5,
+                  "description": "Retain N most recent snapshots."
+                }
+              },
+              "required": [
+                "target"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "session": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "enum": [
+                "claude-sync",
+                "remote-control",
+                "none"
+              ],
+              "default": "claude-sync"
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "sessions",
+                "full"
+              ],
+              "default": "sessions"
+            },
+            "remotePath": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "workspace"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
