@@ -10,17 +10,10 @@ export function mergeDetection(config: WorkspaceConfig, detection: DetectionRepo
   const merged: WorkspaceConfig = structuredClone(config);
 
   // --- git ---
-  // Note: git.identity is never auto-adopted — detection yields an ssh host
-  // alias, not an identity name, so the user must declare which identity to use.
-  merged.git ??= {};
-  if (merged.git.branch == null) {
-    const branch = detectedValue(detection, 'git.branch');
-    if (branch) merged.git.branch = branch;
-  }
-  if (merged.git.remote == null) {
-    const remote = detectedValue(detection, 'git.remote');
-    if (remote) merged.git.remote = remote;
-  }
+  // git defaults (remote=origin, branch=current) come from the schema; the git
+  // provider follows the checked-out branch when branch is "current". git.identity
+  // is never auto-adopted — detection yields an ssh host alias, not an identity
+  // name, so the user must declare which identity to use.
 
   // --- container ---
   const detectedMode = detectedValue(detection, 'container.mode');

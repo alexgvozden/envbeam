@@ -19,21 +19,34 @@ const SCHEME_BY_ENGINE: Record<'postgres' | 'mysql', RegExp> = {
   mysql: /^mysql:\/\//i,
 };
 
-/** Parse a DB connection URL into parts. */
-export function parseDbUrl(url: string): DbConnectionParts {
+// scheme://[user[:password]@]host[:port][/database][?query]
+// Hand-rolled because Node's WHATWG `new URL()` rejects postgres://mysql:// URLs
+// with dotted hostnames (non-special-scheme host parsing quirk).
+const DB_URL_RE =
+  /^[a-z][a-z0-9+.-]*:\/\/(?:([^:@/?#]+)(?::([^@/?#]*))?@)?([^:/?#]*)(?::(\d+))?(?:\/([^?#]*))?/i;
+
+function safeDecode(s: string | undefined): string | undefined {
+  if (s == null) return undefined;
   try {
-    const u = new URL(url);
-    return {
-      url,
-      host: u.hostname || undefined,
-      port: u.port || undefined,
-      user: u.username ? decodeURIComponent(u.username) : undefined,
-      password: u.password ? decodeURIComponent(u.password) : undefined,
-      database: u.pathname ? u.pathname.replace(/^\//, '') || undefined : undefined,
-    };
+    return decodeURIComponent(s);
   } catch {
-    return { url };
+    return s;
   }
+}
+
+/** Parse a DB connection URL into parts (robust to dotted hosts). */
+export function parseDbUrl(url: string): DbConnectionParts {
+  const m = DB_URL_RE.exec(url.trim());
+  if (!m) return { url };
+  const [, user, password, host, port, database] = m;
+  return {
+    url,
+    host: host || undefined,
+    port: port || undefined,
+    user: safeDecode(user) || undefined,
+    password: password != null ? safeDecode(password) : undefined,
+    database: database ? database.replace(/^\//, '') || undefined : undefined,
+  };
 }
 
 /**

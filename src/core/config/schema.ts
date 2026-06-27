@@ -149,11 +149,12 @@ export const workspaceConfigSchema = z
   .object({
     version: z.literal(1).describe('Config schema version.'),
     workspace: z.string().min(1).describe('Human-readable workspace name.'),
-    git: gitConfigSchema.partial().optional(),
+    git: gitConfigSchema.optional(),
     secrets: secretsConfigSchema.optional(),
+    // container stays partial: `mode` has no default and is detection-filled.
     container: containerConfigSchema.partial().optional(),
     database: databaseConfigSchema.optional(),
-    session: sessionConfigSchema.partial().optional(),
+    session: sessionConfigSchema.optional(),
   })
   .strict();
 

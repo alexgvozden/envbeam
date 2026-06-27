@@ -11,12 +11,12 @@ import type { ProviderFactory } from '../registry.js';
 import { SafetyError } from '../../util/errors.js';
 
 function gitConfig(ctx: ProviderContext) {
-  const g = ctx.config.git ?? {};
+  const g = ctx.config.git;
   return {
-    remote: g.remote ?? 'origin',
-    branch: g.branch ?? 'current',
-    autopush: g.autopush ?? true,
-    autopull: g.autopull ?? 'ff-only',
+    remote: g?.remote ?? 'origin',
+    branch: g?.branch ?? 'current',
+    autopush: g?.autopush ?? true,
+    autopull: g?.autopull ?? 'ff-only',
   };
 }
 
@@ -60,11 +60,12 @@ export class GitProviderImpl implements GitProvider {
     const cfg = gitConfig(ctx);
 
     const porcelain = await git(ctx, ['status', '--porcelain']);
+    // Porcelain v1 lines are "XY <path>"; the 2-char status prefix carries
+    // meaningful leading spaces, so strip exactly "XY " without trimming first.
     const dirtyFiles = porcelain.stdout
       .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .map((l) => l.replace(/^..\s+/, ''));
+      .filter((l) => l.length > 0)
+      .map((l) => l.replace(/^.. /, ''));
 
     const upstream = await git(
       ctx,

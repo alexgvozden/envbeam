@@ -84,6 +84,13 @@ export class RealCommandRunner implements CommandRunner {
 
       child.on('error', (err) => {
         if (timer) clearTimeout(timer);
+        // A spawn failure (e.g. binary not on PATH → ENOENT) is, under
+        // allowFailure, just a non-zero result the caller can inspect — not a
+        // crash. This keeps best-effort steps tolerant of missing tools.
+        if (options.allowFailure) {
+          resolve({ command, args, code: 127, stdout, stderr: `${stderr}${(err as Error).message}` });
+          return;
+        }
         reject(err);
       });
 
