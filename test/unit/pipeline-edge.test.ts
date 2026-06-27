@@ -45,8 +45,9 @@ function baseRunner(over: { dirty?: string[]; psqlRows?: () => string } = {}): F
   r.on('sh', { stdout: 'ok' });
   r.on('claude-sync', {});
   r.on('pg_dump', (_c, a) => {
-    const f = a[a.indexOf('-f') + 1]!;
-    writeFileSync(f, '-- dump\n'.repeat(10));
+    const i = a.indexOf('-f');
+    if (i < 0) return { stdout: 'pg_dump 14.0' }; // --version probe
+    writeFileSync(a[i + 1]!, '-- dump\n'.repeat(10));
     return {};
   });
   return r;
@@ -168,9 +169,9 @@ describe('encrypted snapshot round trip (fake age)', () => {
     runner.available('age');
     // fake age: encrypt copies in→out, decrypt copies out→in (synchronously)
     runner.on('age', (_c, a) => {
-      const out = a[a.indexOf('-o') + 1]!;
-      const input = a[a.length - 1]!;
-      copyFileSync(input, out);
+      const o = a.indexOf('-o');
+      if (o < 0) return { stdout: 'age 1.0' }; // --version probe
+      copyFileSync(a[a.length - 1]!, a[o + 1]!);
       return {};
     });
     const sync = { target: 'local-folder', path: syncDir, encrypt: 'age', recipient: 'age1xyz', keep: 5 };

@@ -182,8 +182,9 @@ describe('pause pipeline', () => {
     const syncDir = path.join(envbeamHome, 'snaps');
     const runner = happyRunner();
     runner.on('pg_dump', (_c, args) => {
-      const f = args[args.indexOf('-f') + 1]!;
-      void fs.writeFile(f, '-- dump\n');
+      const i = args.indexOf('-f');
+      if (i < 0) return { stdout: 'pg_dump 14.0' };
+      void fs.writeFile(args[i + 1]!, '-- dump\n');
       return {};
     });
     const config = fullConfig({
@@ -211,7 +212,9 @@ describe('pause pipeline', () => {
     const runner = happyRunner();
     runner.on('psql', (_c, args) => (args.includes('SELECT 1') ? { stdout: '1' } : { stdout: String(rows) }));
     runner.on('pg_dump', (_c, args) => {
-      void fs.writeFile(args[args.indexOf('-f') + 1]!, '-- dump\n');
+      const i = args.indexOf('-f');
+      if (i < 0) return { stdout: 'pg_dump 14.0' };
+      void fs.writeFile(args[i + 1]!, '-- dump\n');
       return {};
     });
     const config = fullConfig({
