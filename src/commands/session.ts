@@ -80,10 +80,36 @@ export async function sessionSetupCommand(opts: SessionSetupOptions): Promise<nu
       throw new EnvbeamError(`Failed to generate age keys: ${keygenRes.stderr}`, { exitCode: 2 });
     }
 
-    const privateKey = keygenRes.stdout.trim();
-    const pubKeyMatch = keygenRes.stderr.match(/public key: (age1[a-z0-9]+)/i);
-    if (!pubKeyMatch || !privateKey.startsWith('AGE-SECRET-KEY-')) {
-      throw new EnvbeamError('Failed to parse age-keygen output', { exitCode: 2 });
+    // age-keygen outputs:
+    // - Private key to stdout (AGE-SECRET-KEY-...)
+    // - Public key comment to stderr (# public key: age1...)
+    // But on some systems both may go to stdout, so check both
+    const combined = keygenRes.stdout + '\n' + keygenRes.stderr;
+
+    if (opts.verbose) {
+      logger.raw(pc.dim('age-keygen stdout: ' + JSON.stringify(keygenRes.stdout)));
+      logger.raw(pc.dim('age-keygen stderr: ' + JSON.stringify(keygenRes.stderr)));
+    }
+
+    // Extract private key (AGE-SECRET-KEY-...)
+    const privateKeyMatch = combined.match(/(AGE-SECRET-KEY-[A-Z0-9]+)/);
+    if (!privateKeyMatch) {
+      throw new EnvbeamError(
+        'Failed to parse age-keygen output: no private key found' +
+          (opts.verbose ? '' : ' (run with --verbose for details)'),
+        { exitCode: 2 },
+      );
+    }
+    const privateKey = privateKeyMatch[1]!;
+
+    // Extract public key (age1...)
+    const pubKeyMatch = combined.match(/(?:public key:\s*)?(age1[a-z0-9]+)/i);
+    if (!pubKeyMatch) {
+      throw new EnvbeamError(
+        'Failed to parse age-keygen output: no public key found' +
+          (opts.verbose ? '' : ' (run with --verbose for details)'),
+        { exitCode: 2 },
+      );
     }
     const publicKey = pubKeyMatch[1]!;
     logger.sub(`Generated key: ${publicKey.slice(0, 20)}...`);
