@@ -155,6 +155,14 @@ export async function ensureTool(
   prompter: Prompter,
 ): Promise<EnsureToolResult> {
   const tool = TOOLS[toolName];
+  const platform = getPlatform();
+
+  // On Windows, refresh PATH from registry first - a tool may have been
+  // installed in another terminal session but our PATH is stale
+  if (platform === 'win32') {
+    refreshPathOnWindows();
+  }
+
   if (!tool) {
     // Unknown tool, just check if it exists
     const found = await runner.which(toolName);
@@ -168,7 +176,6 @@ export async function ensureTool(
   }
 
   // Not installed - prompt user
-  const platform = getPlatform();
   const installCmd = tool.installCommands[platform];
 
   logger.warn(`${tool.name} is not installed.`);
@@ -197,26 +204,35 @@ export async function ensureTool(
     installResult = await runner.run('sh', ['-c', installCmd], { allowFailure: true });
   }
 
-  if (installResult.code !== 0) {
-    logger.error(`Installation failed. Please install manually:`);
-    logger.raw(`  ${installCmd}`);
-    return { installed: false, wasInstalled: false };
-  }
-
   // On Windows, refresh PATH from registry to pick up newly installed tools
+  // Do this regardless of exit code - winget returns non-zero if already installed
   if (platform === 'win32') {
     refreshPathOnWindows();
   }
 
-  // Verify installation
+  // Check if the tool is now available (regardless of installer exit code)
   const nowFound = await runner.which(tool.command);
   if (nowFound) {
     logger.success(`${tool.name} installed successfully.`);
     return { installed: true, wasInstalled: true };
+  }
+
+  // Tool still not found - report the actual install error if there was one
+  if (installResult.code !== 0) {
+    // Check if it's a "already installed" message (winget returns non-zero for this)
+    const output = (installResult.stdout + installResult.stderr).toLowerCase();
+    if (output.includes('already installed') || output.includes('no available upgrade')) {
+      logger.warn(`${tool.name} is installed but not found in PATH.`);
+      logger.hint('Try opening a new terminal window, or add the install location to your PATH.');
+    } else {
+      logger.error(`Installation failed. Please install manually:`);
+      logger.raw(`  ${installCmd}`);
+    }
   } else {
     logger.warn(`${tool.name} installed but not found in PATH. You may need to restart your terminal.`);
-    return { installed: false, wasInstalled: true };
   }
+
+  return { installed: false, wasInstalled: installResult.code === 0 };
 }
 
 /**
