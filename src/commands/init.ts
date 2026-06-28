@@ -1,4 +1,5 @@
 import path from 'node:path';
+import os from 'node:os';
 import { promises as fs } from 'node:fs';
 import pc from 'picocolors';
 import { WORKSPACE_CONFIG_NAME } from '../core/config/paths.js';
@@ -7,6 +8,66 @@ import { detectWorkspace } from '../core/detect/index.js';
 import { detectedValue, getField } from '../core/detect/types.js';
 import { parseConfig } from '../core/config/load.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
+
+/**
+ * Parse git remote URL and detect identity from SSH config.
+ * e.g., git@github-work:org/repo.git → github:work
+ */
+async function detectGitIdentity(gitUrl: string | undefined): Promise<string | undefined> {
+  if (!gitUrl) return undefined;
+
+  // Parse host from git URL
+  // Formats: git@host:path, ssh://git@host/path, https://host/path
+  let host: string | undefined;
+  const sshMatch = gitUrl.match(/^(?:ssh:\/\/)?git@([^:/]+)[:/]/);
+  const httpsMatch = gitUrl.match(/^https?:\/\/([^/]+)\//);
+  host = sshMatch?.[1] ?? httpsMatch?.[1];
+
+  if (!host) return undefined;
+
+  // Check if this is a custom SSH host alias (not a standard domain)
+  // e.g., github-work, gitlab-personal
+  if (!host.includes('.')) {
+    // It's an alias like "github-work" - convert to identity format
+    // github-work → github:work, gitlab-personal → gitlab:personal
+    const parts = host.split('-');
+    if (parts.length >= 2) {
+      return `${parts[0]}:${parts.slice(1).join('-')}`;
+    }
+    return `git:${host}`;
+  }
+
+  // Standard domain - try to read SSH config to find matching Host entries
+  const sshConfigPath = path.join(os.homedir(), '.ssh', 'config');
+  try {
+    const sshConfig = await fs.readFile(sshConfigPath, 'utf8');
+    // Look for Host entries that have HostName matching this domain
+    // e.g., Host github-work → HostName github.com
+    const hostPattern = new RegExp(
+      `Host\\s+(\\S+)[^]*?HostName\\s+${host.replace('.', '\\.')}`,
+      'gi',
+    );
+    const matches = [...sshConfig.matchAll(hostPattern)];
+    for (const match of matches) {
+      const alias = match[1];
+      if (alias && alias !== host && !alias.includes('*')) {
+        // Found an alias - convert to identity format
+        const parts = alias.split('-');
+        if (parts.length >= 2) {
+          return `${parts[0]}:${parts.slice(1).join('-')}`;
+        }
+      }
+    }
+  } catch {
+    // No SSH config or can't read it
+  }
+
+  // Standard domain without custom alias
+  // github.com → github:default, gitlab.com → gitlab:default
+  const domainParts = host.split('.');
+  if (domainParts[0] === 'www') domainParts.shift();
+  return undefined; // Don't suggest identity for standard domains
+}
 
 export interface InitOptions extends GlobalCliOptions {
   force?: boolean;
@@ -30,15 +91,19 @@ export async function initCommand(opts: InitOptions): Promise<number> {
     const hasDb = dbField?.status === 'detected';
 
     logger.raw(pc.bold('envbeam init'));
-    if (detectedValue(detection, 'git.url')) {
-      logger.sub(pc.dim(`detected git remote ${detectedRemote}: ${detectedValue(detection, 'git.url')}`));
+    const gitUrl = detectedValue(detection, 'git.url');
+    if (gitUrl) {
+      logger.sub(pc.dim(`detected git remote ${detectedRemote}: ${gitUrl}`));
+    }
+
+    // Auto-detect git identity from remote URL and SSH config
+    const detectedGitIdentity = await detectGitIdentity(gitUrl);
+    if (detectedGitIdentity) {
+      logger.sub(pc.dim(`detected git identity: ${detectedGitIdentity}`));
     }
 
     const workspace = await prompter.input('Workspace name', path.basename(cwd));
-    const gitIdentity = await prompter.input(
-      'Git identity name (e.g. github:work) — blank to set later',
-      '',
-    );
+    const gitIdentity = detectedGitIdentity ?? '';
     const secretsProvider = await prompter.select(
       'Secrets provider',
       [
@@ -66,29 +131,13 @@ export async function initCommand(opts: InitOptions): Promise<number> {
       ],
       hasDb ? 'migrations-only' : 'none',
     );
-    const sessionProvider = await prompter.select(
-      'Session sync',
-      [
-        { name: 'claude-native (built-in, syncs to S3)', value: 'claude-native' },
-        { name: 'claude-sync (external CLI)', value: 'claude-sync' },
-        { name: 'remote-control (link only)', value: 'remote-control' },
-        { name: 'none', value: 'none' },
-      ],
-      'claude-native',
-    );
+    // Simple yes/no for Claude session sync
+    const enableSessionSync = await prompter.confirm('Enable Claude session sync?', true);
+    const sessionProvider = enableSessionSync ? 'claude-native' : 'none';
+    const sessionScope = 'project'; // Default to project scope
 
-    let sessionScope: string = 'project';
-    if (sessionProvider === 'claude-native') {
-      sessionScope = await prompter.select(
-        'Session scope',
-        [
-          { name: 'project — ~/.claude/projects/<path>/ sessions only', value: 'project' },
-          { name: 'workspace — .claude/ folder in repo', value: 'workspace' },
-          { name: 'global — ~/.claude/ (tools, plugins, all sessions)', value: 'global' },
-        ],
-        'project',
-      );
-      logger.hint('Encryption keys are stored in Doppler. Run `envbeam storage setup` if not done.');
+    if (enableSessionSync) {
+      logger.hint('Run `envbeam storage setup` then `envbeam session setup` to configure.');
     }
 
     const yaml = renderConfig({
