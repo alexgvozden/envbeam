@@ -21,12 +21,18 @@ async function generateCommitMessage(
 
   logger.info('Generating commit message with Claude...');
 
-  // Get git diff for context
-  const diff = await ctx.runner.run('git', ['diff', '--staged', '--stat'], {
+  // Get git diff for context (unstaged changes, since we haven't staged yet)
+  const diff = await ctx.runner.run('git', ['diff', '--stat'], {
     cwd: ctx.workspaceRoot,
     allowFailure: true,
   });
-  const diffContent = diff.stdout.trim() || 'No staged changes';
+
+  // Also get actual diff content (limited to avoid huge prompts)
+  const diffContent = await ctx.runner.run('git', ['diff', '--no-color'], {
+    cwd: ctx.workspaceRoot,
+    allowFailure: true,
+  });
+  const diffText = diffContent.stdout.slice(0, 4000); // Limit size
 
   // Also get list of changed files
   const status = await ctx.runner.run('git', ['status', '--porcelain'], {
@@ -34,13 +40,13 @@ async function generateCommitMessage(
     allowFailure: true,
   });
 
-  const prompt = `Generate a concise git commit message (1 line, max 72 chars) for these changes. Only output the message, nothing else.
+  const prompt = `Generate a concise git commit message (1 line, max 72 chars) for these changes. Only output the commit message text, nothing else - no quotes, no explanation.
 
-Changed files:
+Files changed:
 ${status.stdout.trim()}
 
-Diff stats:
-${diffContent}`;
+Diff:
+${diffText}`;
 
   const result = await ctx.runner.run('claude', ['-p', prompt], {
     cwd: ctx.workspaceRoot,
@@ -49,14 +55,25 @@ ${diffContent}`;
   });
 
   if (result.code === 0 && result.stdout.trim()) {
-    const generated = result.stdout.trim().replace(/^["']|["']$/g, '');
-    logger.sub(pc.dim(`Generated: ${generated}`));
+    // Clean up the response - remove quotes, newlines, etc.
+    const firstLine = result.stdout.trim().split('\n')[0] ?? '';
+    const generated = firstLine
+      .replace(/^["'`]|["'`]$/g, '')  // Remove surrounding quotes
+      .trim();
 
-    // Let user confirm or edit
-    const confirmed = await prompter.confirm(`Use this message?`, true);
-    if (confirmed) {
-      return generated;
+    if (generated.length > 0 && generated.length <= 100) {
+      logger.sub(pc.dim(`→ ${generated}`));
+
+      // Let user confirm or edit
+      const confirmed = await prompter.confirm('Use this message?', true);
+      if (confirmed) {
+        return generated;
+      }
+      // If not confirmed, fall through to manual input with generated as default
+      return prompter.input('Commit message', generated);
     }
+  } else if (result.code !== 0) {
+    logger.sub(pc.dim('Claude unavailable, falling back to manual input'));
   }
 
   // Fall back to manual input
