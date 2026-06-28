@@ -10,8 +10,13 @@ import type {
 } from '../types.js';
 import type { ProviderFactory } from '../registry.js';
 import type { SyncConfig } from '../../config/schema.js';
-import { createSyncTarget, encryptionSuffix, encryptFile, decryptFile } from '../../sync/index.js';
-import { getGlobalStorageConfig, injectStorageEnv } from '../../storage/global.js';
+import { createSyncTarget, encryptFile, decryptFile } from '../../sync/index.js';
+import {
+  getGlobalStorageConfig,
+  injectStorageEnv,
+  getGlobalEncryptionConfig,
+  injectEncryptionEnv,
+} from '../../storage/global.js';
 import { ensureDir, pathExists } from '../../util/fs.js';
 import { machineName } from '../database/base.js';
 
@@ -164,22 +169,25 @@ export class ClaudeNativeProvider implements SessionProvider {
       return { action: 'noop', detail: 'no sync target configured' };
     }
 
-    // Enforce encryption for session data (contains sensitive conversation history)
-    const effectiveEncrypt = syncConfig.encrypt === 'none' ? 'age' : syncConfig.encrypt;
-    if (!syncConfig.recipient) {
-      return {
-        action: 'noop',
-        detail: 'session sync requires encryption: set sync.recipient (age public key or gpg key id)'
-      };
+    // Fetch encryption keys from Doppler if not in environment
+    if (!process.env.ENVBEAM_AGE_PUBLIC_KEY) {
+      const encryptionConfig = await getGlobalEncryptionConfig(ctx.runner);
+      if (!encryptionConfig) {
+        return {
+          action: 'noop',
+          detail: 'no encryption keys found. Run `envbeam storage setup` first.',
+        };
+      }
+      injectEncryptionEnv(encryptionConfig);
     }
 
-    // Always encrypt session archives
-    const encryptedConfig: SyncConfig = { ...syncConfig, encrypt: effectiveEncrypt };
-    const suffix = effectiveEncrypt === 'age' ? '.age' : '.gpg';
+    // Always encrypt session archives with age
+    const encryptedConfig: SyncConfig = { ...syncConfig, encrypt: 'age' };
+    const suffix = '.age';
     const uploadPath = archivePath + suffix;
     const uploadName = archiveName + suffix;
     await encryptFile(ctx, encryptedConfig, archivePath, uploadPath);
-    ctx.logger.sub(`session encrypted with ${effectiveEncrypt}`);
+    ctx.logger.sub('session encrypted');
 
     // Upload metadata separately (not encrypted - contains no sensitive data)
     const metaArchiveName = archiveName.replace('.tar.gz', '.meta.json');
@@ -247,28 +255,27 @@ export class ClaudeNativeProvider implements SessionProvider {
       return { action: 'noop', detail: 'no sync target configured' };
     }
 
-    // Session files are always encrypted - find the encrypted version
-    const ageSuffix = '.age';
-    const gpgSuffix = '.gpg';
-    let downloadName = latest.name;
-    let decryptType: 'age' | 'gpg' = 'age';
+    // Fetch encryption keys from Doppler if not in environment
+    if (!process.env.ENVBEAM_AGE_PRIVATE_KEY) {
+      const encryptionConfig = await getGlobalEncryptionConfig(ctx.runner);
+      if (!encryptionConfig) {
+        return {
+          action: 'noop',
+          detail: 'no encryption keys found. Run `envbeam storage setup` first.',
+        };
+      }
+      injectEncryptionEnv(encryptionConfig);
+    }
 
-    // Look for encrypted versions
-    const ageEntry = entries.find((e) => e.name === latest.name + ageSuffix || e.name.endsWith(ageSuffix));
-    const gpgEntry = entries.find((e) => e.name === latest.name + gpgSuffix || e.name.endsWith(gpgSuffix));
-
-    if (ageEntry) {
-      downloadName = ageEntry.name;
-      decryptType = 'age';
-    } else if (gpgEntry) {
-      downloadName = gpgEntry.name;
-      decryptType = 'gpg';
-    } else {
+    // Session files are always encrypted with age
+    const ageEntry = entries.find((e) => e.name.endsWith('.age'));
+    if (!ageEntry) {
       return { action: 'noop', detail: 'no encrypted session archive found' };
     }
 
+    const downloadName = ageEntry.name;
     const downloadPath = path.join(tempDir, downloadName);
-    const archiveName = downloadName.replace(/\.(age|gpg)$/, '');
+    const archiveName = downloadName.replace(/\.age$/, '');
     const archivePath = path.join(tempDir, archiveName);
     const metaPath = path.join(tempDir, archiveName.replace('.tar.gz', '.meta.json'));
 
@@ -279,10 +286,10 @@ export class ClaudeNativeProvider implements SessionProvider {
     }
 
     // Always decrypt session archives
-    const decryptConfig: SyncConfig = { ...syncConfig, encrypt: decryptType };
+    const decryptConfig: SyncConfig = { ...syncConfig, encrypt: 'age' };
     await decryptFile(ctx, decryptConfig, downloadPath, archivePath);
     await fs.rm(downloadPath, { force: true });
-    ctx.logger.sub(`session decrypted`);
+    ctx.logger.sub('session decrypted');
 
     // Try to get metadata
     let metadata: { workspaceRoot?: string; remotePaths?: Record<string, string> } = {};

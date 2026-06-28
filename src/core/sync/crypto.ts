@@ -1,3 +1,6 @@
+import os from 'node:os';
+import path from 'node:path';
+import { promises as fs } from 'node:fs';
 import type { ProviderContext } from '../providers/types.js';
 import type { SyncConfig } from '../config/schema.js';
 import { EnvbeamError } from '../util/errors.js';
@@ -12,6 +15,20 @@ export function encryptionSuffix(cfg: SyncConfig | undefined): string {
   return cfg.encrypt === 'age' ? '.age' : '.gpg';
 }
 
+/**
+ * Get age public key from: config.recipient > ENVBEAM_AGE_PUBLIC_KEY env var
+ */
+function getAgePublicKey(cfg: SyncConfig): string | undefined {
+  return cfg.recipient ?? process.env.ENVBEAM_AGE_PUBLIC_KEY;
+}
+
+/**
+ * Get age private key from ENVBEAM_AGE_PRIVATE_KEY env var
+ */
+function getAgePrivateKey(): string | undefined {
+  return process.env.ENVBEAM_AGE_PRIVATE_KEY;
+}
+
 export async function encryptFile(
   ctx: ProviderContext,
   cfg: SyncConfig,
@@ -19,12 +36,14 @@ export async function encryptFile(
   outFile: string,
 ): Promise<void> {
   if (cfg.encrypt === 'age') {
-    if (!cfg.recipient) {
-      throw new EnvbeamError('sync.encrypt: age requires sync.recipient (an age public key).', {
-        exitCode: 2,
-      });
+    const recipient = getAgePublicKey(cfg);
+    if (!recipient) {
+      throw new EnvbeamError(
+        'age encryption requires a public key. Set sync.recipient in config or run `envbeam storage setup`.',
+        { exitCode: 2 },
+      );
     }
-    await ctx.runner.run('age', ['-r', cfg.recipient, '-o', outFile, inFile], {
+    await ctx.runner.run('age', ['-r', recipient, '-o', outFile, inFile], {
       cwd: ctx.workspaceRoot,
     });
   } else if (cfg.encrypt === 'gpg') {
@@ -48,9 +67,22 @@ export async function decryptFile(
   outFile: string,
 ): Promise<void> {
   if (cfg.encrypt === 'age') {
-    // age -d uses the recipient's identity from default key locations (~/.config/age)
-    // or the AGE_IDENTITY env var, which the caller can supply via the sync identity.
-    await ctx.runner.run('age', ['-d', '-o', outFile, inFile], { cwd: ctx.workspaceRoot });
+    const privateKey = getAgePrivateKey();
+    if (privateKey) {
+      // Write private key to temp file for age -d -i
+      const tempKeyFile = path.join(os.tmpdir(), `envbeam-age-${Date.now()}.key`);
+      try {
+        await fs.writeFile(tempKeyFile, privateKey + '\n', { mode: 0o600 });
+        await ctx.runner.run('age', ['-d', '-i', tempKeyFile, '-o', outFile, inFile], {
+          cwd: ctx.workspaceRoot,
+        });
+      } finally {
+        await fs.rm(tempKeyFile, { force: true }).catch(() => {});
+      }
+    } else {
+      // Fall back to default identity locations
+      await ctx.runner.run('age', ['-d', '-o', outFile, inFile], { cwd: ctx.workspaceRoot });
+    }
   } else if (cfg.encrypt === 'gpg') {
     await ctx.runner.run('gpg', ['--batch', '--yes', '--decrypt', '--output', outFile, inFile], {
       cwd: ctx.workspaceRoot,

@@ -11,6 +11,11 @@ export interface GlobalStorageConfig {
   secretKey: string;
 }
 
+export interface GlobalEncryptionConfig {
+  agePublicKey: string;
+  agePrivateKey: string;
+}
+
 /**
  * Fetch global storage configuration.
  * Priority: environment variables > Doppler envbeam-global project
@@ -85,4 +90,50 @@ export function injectStorageEnv(config: GlobalStorageConfig): void {
  */
 export async function hasGlobalStorage(runner: CommandRunner): Promise<boolean> {
   return (await getGlobalStorageConfig(runner)) !== null;
+}
+
+/**
+ * Fetch global encryption config (age keys) from Doppler.
+ */
+export async function getGlobalEncryptionConfig(runner: CommandRunner): Promise<GlobalEncryptionConfig | null> {
+  // Check environment variables first
+  const pubKey = process.env.ENVBEAM_AGE_PUBLIC_KEY;
+  const privKey = process.env.ENVBEAM_AGE_PRIVATE_KEY;
+  if (pubKey && privKey) {
+    return { agePublicKey: pubKey, agePrivateKey: privKey };
+  }
+
+  // Try Doppler
+  const dopplerPath = await runner.which('doppler');
+  if (!dopplerPath) return null;
+
+  const res = await runner.run(
+    'doppler',
+    ['secrets', '--project', DOPPLER_PROJECT, '--config', DOPPLER_CONFIG, '--json'],
+    { allowFailure: true },
+  );
+
+  if (res.code !== 0) return null;
+
+  try {
+    const secrets = JSON.parse(res.stdout) as Record<string, { computed?: string }>;
+    const agePublicKey = secrets['ENVBEAM_AGE_PUBLIC_KEY']?.computed;
+    const agePrivateKey = secrets['ENVBEAM_AGE_PRIVATE_KEY']?.computed;
+
+    if (agePublicKey && agePrivateKey) {
+      return { agePublicKey, agePrivateKey };
+    }
+  } catch {
+    /* ignore parse errors */
+  }
+
+  return null;
+}
+
+/**
+ * Inject encryption config into environment variables.
+ */
+export function injectEncryptionEnv(config: GlobalEncryptionConfig): void {
+  process.env.ENVBEAM_AGE_PUBLIC_KEY = config.agePublicKey;
+  process.env.ENVBEAM_AGE_PRIVATE_KEY = config.agePrivateKey;
 }

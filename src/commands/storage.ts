@@ -105,7 +105,33 @@ export async function storageSetupCommand(opts: StorageSetupOptions): Promise<nu
       throw new EnvbeamError('Secret Access Key is required.', { exitCode: 2 });
     }
 
-    // 5. Upload secrets to Doppler using `doppler secrets set`
+    // 5. Generate age encryption keys
+    logger.raw('');
+    logger.info('Generating encryption keys…');
+
+    const ageInstalled = await runner.which('age-keygen');
+    if (!ageInstalled) {
+      throw new EnvbeamError(
+        'age-keygen not found. Install age: https://github.com/FiloSottile/age#installation',
+        { exitCode: 2 },
+      );
+    }
+
+    const keygenRes = await runner.run('age-keygen', [], { allowFailure: true });
+    if (keygenRes.code !== 0) {
+      throw new EnvbeamError(`Failed to generate age keys: ${keygenRes.stderr}`, { exitCode: 2 });
+    }
+
+    // Parse age-keygen output: public key is in stderr comment, private key is stdout
+    const privateKey = keygenRes.stdout.trim();
+    const pubKeyMatch = keygenRes.stderr.match(/public key: (age1[a-z0-9]+)/i);
+    if (!pubKeyMatch || !privateKey.startsWith('AGE-SECRET-KEY-')) {
+      throw new EnvbeamError('Failed to parse age-keygen output', { exitCode: 2 });
+    }
+    const publicKey = pubKeyMatch[1]!;
+    logger.sub(`Generated age key: ${publicKey.slice(0, 20)}...`);
+
+    // 6. Upload secrets to Doppler using `doppler secrets set`
     logger.raw('');
     logger.info('Storing credentials in Doppler…');
 
@@ -115,6 +141,8 @@ export async function storageSetupCommand(opts: StorageSetupOptions): Promise<nu
       ['ENVBEAM_S3_REGION', region],
       ['ENVBEAM_S3_ACCESS_KEY', accessKey],
       ['ENVBEAM_S3_SECRET_KEY', secretKey],
+      ['ENVBEAM_AGE_PUBLIC_KEY', publicKey],
+      ['ENVBEAM_AGE_PRIVATE_KEY', privateKey],
     ];
 
     // Use `doppler secrets set KEY=VALUE ...` to set multiple secrets
