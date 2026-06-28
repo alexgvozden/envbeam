@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import { RealCommandRunner } from '../core/util/exec.js';
 import { EnvbeamError } from '../core/util/errors.js';
+import { ensureTools } from '../core/util/tools.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
 
 const DOPPLER_PROJECT = 'envbeam-global';
@@ -21,13 +22,11 @@ export async function sessionSetupCommand(opts: SessionSetupOptions): Promise<nu
   return runCommand(logger, async () => {
     const runner = new RealCommandRunner();
 
-    // 1. Check Doppler CLI
-    const dopplerPath = await runner.which('doppler');
-    if (!dopplerPath) {
-      throw new EnvbeamError(
-        'Doppler CLI not found. Install it first: https://docs.doppler.com/docs/install-cli',
-        { exitCode: 2 },
-      );
+    // 1. Check required tools
+    logger.info('Checking required tools…');
+    const { allInstalled, missing } = await ensureTools(['doppler', 'age-keygen'], runner, logger, prompter);
+    if (!allInstalled) {
+      throw new EnvbeamError(`Missing required tools: ${missing.join(', ')}`, { exitCode: 2 });
     }
 
     // 2. Check storage is configured
@@ -55,16 +54,7 @@ export async function sessionSetupCommand(opts: SessionSetupOptions): Promise<nu
     }
     logger.sub('Storage configured ✓');
 
-    // 3. Check age is installed
-    const ageInstalled = await runner.which('age-keygen');
-    if (!ageInstalled) {
-      throw new EnvbeamError(
-        'age-keygen not found. Install age: https://github.com/FiloSottile/age#installation',
-        { exitCode: 2 },
-      );
-    }
-
-    // 4. Prompt for session scope
+    // 3. Prompt for session scope
     logger.raw('');
     logger.raw(pc.bold('Claude Session Sync Configuration'));
     logger.raw('');
@@ -81,7 +71,7 @@ export async function sessionSetupCommand(opts: SessionSetupOptions): Promise<nu
         'project',
       ));
 
-    // 5. Generate encryption keys
+    // 4. Generate encryption keys
     logger.raw('');
     logger.info('Generating encryption keys…');
 
@@ -98,7 +88,7 @@ export async function sessionSetupCommand(opts: SessionSetupOptions): Promise<nu
     const publicKey = pubKeyMatch[1]!;
     logger.sub(`Generated key: ${publicKey.slice(0, 20)}...`);
 
-    // 6. Store keys in Doppler
+    // 5. Store keys in Doppler
     logger.info('Storing encryption keys in Doppler…');
 
     const secrets: Array<[string, string]> = [

@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import { RealCommandRunner } from '../core/util/exec.js';
 import { EnvbeamError } from '../core/util/errors.js';
+import { ensureTools } from '../core/util/tools.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
 
 export interface StorageSetupOptions extends GlobalCliOptions {
@@ -25,14 +26,11 @@ export async function storageSetupCommand(opts: StorageSetupOptions): Promise<nu
   return runCommand(logger, async () => {
     const runner = new RealCommandRunner();
 
-    // 1. Check Doppler CLI is installed
-    logger.info('Checking Doppler CLI…');
-    const dopplerPath = await runner.which('doppler');
-    if (!dopplerPath) {
-      throw new EnvbeamError(
-        'Doppler CLI not found. Install it first: https://docs.doppler.com/docs/install-cli',
-        { exitCode: 2 },
-      );
+    // 1. Check required tools
+    logger.info('Checking required tools…');
+    const { allInstalled, missing } = await ensureTools(['doppler', 'aws'], runner, logger, prompter);
+    if (!allInstalled) {
+      throw new EnvbeamError(`Missing required tools: ${missing.join(', ')}`, { exitCode: 2 });
     }
 
     // 2. Check Doppler is authenticated
