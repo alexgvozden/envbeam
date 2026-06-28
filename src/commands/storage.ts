@@ -219,6 +219,8 @@ export async function storageStatusCommand(opts: GlobalCliOptions): Promise<numb
     let hasDopplerGlobal = false;
     let dopplerBucket: string | undefined;
     let dopplerEndpoint: string | undefined;
+    let hasEncryptionKeys = false;
+    let agePublicKey: string | undefined;
     const secretsRes = await runner.run(
       'doppler',
       ['secrets', '--project', DOPPLER_PROJECT, '--config', DOPPLER_CONFIG, '--json'],
@@ -230,6 +232,8 @@ export async function storageStatusCommand(opts: GlobalCliOptions): Promise<numb
         hasDopplerGlobal = Object.keys(secrets).some((k) => k.startsWith('ENVBEAM_S3_'));
         dopplerBucket = secrets['ENVBEAM_S3_BUCKET']?.computed;
         dopplerEndpoint = secrets['ENVBEAM_S3_ENDPOINT']?.computed;
+        hasEncryptionKeys = !!(secrets['ENVBEAM_AGE_PUBLIC_KEY']?.computed && secrets['ENVBEAM_AGE_PRIVATE_KEY']?.computed);
+        agePublicKey = secrets['ENVBEAM_AGE_PUBLIC_KEY']?.computed;
       } catch {
         /* ignore parse errors */
       }
@@ -252,12 +256,21 @@ export async function storageStatusCommand(opts: GlobalCliOptions): Promise<numb
       const endpointInfo = dopplerEndpoint ? ` via ${dopplerEndpoint}` : '';
       logger.raw(pc.green('✓') + ` Global storage configured${bucketInfo}${endpointInfo}`);
       logger.raw(pc.dim('  Credentials auto-loaded from Doppler when needed.'));
-      logger.raw('');
-      logger.hint('For workspace-specific storage, override with database.sync in .envbeam.yaml');
     } else {
       // No storage configured
       logger.raw(pc.yellow('!') + ' No storage configured.');
       logger.hint('Run `envbeam storage setup` to configure global S3 storage.');
+    }
+
+    // Encryption status
+    logger.raw('');
+    if (hasEncryptionKeys) {
+      const keyPreview = agePublicKey ? agePublicKey.slice(0, 15) + '...' : '';
+      logger.raw(pc.green('✓') + ` Encryption keys configured ${pc.dim(`(${keyPreview})`)}`);
+      logger.raw(pc.dim('  Session data will be encrypted with age.'));
+    } else if (hasDopplerGlobal) {
+      logger.raw(pc.yellow('!') + ' No encryption keys found.');
+      logger.hint('Re-run `envbeam storage setup` to generate age encryption keys.');
     }
 
     return 0;
