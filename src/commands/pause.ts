@@ -13,7 +13,7 @@ async function generateCommitMessage(
   logger: Logger,
   prompter: Prompter,
 ): Promise<string> {
-  // Check if claude CLI is available
+  // Check if claude CLI is available - get the full path
   const claudePath = await ctx.runner.which('claude');
   if (!claudePath) {
     return prompter.input('Commit message', 'envbeam: pause checkpoint');
@@ -21,44 +21,35 @@ async function generateCommitMessage(
 
   logger.info('Generating commit message with Claude...');
 
-  // Get git diff for context (unstaged changes, since we haven't staged yet)
-  const diff = await ctx.runner.run('git', ['diff', '--stat'], {
-    cwd: ctx.workspaceRoot,
-    allowFailure: true,
-  });
-
-  // Also get actual diff content (limited to avoid huge prompts)
-  const diffContent = await ctx.runner.run('git', ['diff', '--no-color'], {
-    cwd: ctx.workspaceRoot,
-    allowFailure: true,
-  });
-  const diffText = diffContent.stdout.slice(0, 4000); // Limit size
-
-  // Also get list of changed files
+  // Get list of changed files
   const status = await ctx.runner.run('git', ['status', '--porcelain'], {
     cwd: ctx.workspaceRoot,
     allowFailure: true,
   });
 
-  const prompt = `Generate a concise git commit message (1 line, max 72 chars) for these changes. Only output the commit message text, nothing else - no quotes, no explanation.
+  // Keep prompt short and simple for reliability
+  const filesChanged = status.stdout.trim().split('\n').slice(0, 10).join('\n');
+  const prompt = `Write a short git commit message (under 72 chars) for:\n${filesChanged}`;
 
-Files changed:
-${status.stdout.trim()}
-
-Diff:
-${diffText}`;
-
-  const result = await ctx.runner.run('claude', ['-p', prompt], {
+  // Use full path to claude to avoid spawn ENOENT issues
+  const result = await ctx.runner.run(claudePath, ['-p', prompt], {
     cwd: ctx.workspaceRoot,
     allowFailure: true,
-    timeout: 30000,
+    timeout: 60000, // Give it more time
   });
+
+  // Debug info
+  if (result.code !== 0 || !result.stdout.trim()) {
+    const debugInfo = `code=${result.code}, stdout=${result.stdout.length}b, stderr=${result.stderr.slice(0, 100)}`;
+    logger.sub(pc.dim(`Claude: ${debugInfo}`));
+  }
 
   if (result.code === 0 && result.stdout.trim()) {
     // Clean up the response - remove quotes, newlines, etc.
     const firstLine = result.stdout.trim().split('\n')[0] ?? '';
     const generated = firstLine
       .replace(/^["'`]|["'`]$/g, '')  // Remove surrounding quotes
+      .replace(/^(commit:?\s*)/i, '') // Remove "commit:" prefix if present
       .trim();
 
     if (generated.length > 0 && generated.length <= 100) {
@@ -72,8 +63,6 @@ ${diffText}`;
       // If not confirmed, fall through to manual input with generated as default
       return prompter.input('Commit message', generated);
     }
-  } else if (result.code !== 0) {
-    logger.sub(pc.dim('Claude unavailable, falling back to manual input'));
   }
 
   // Fall back to manual input
