@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createRequire } from 'node:module';
 import { Command } from 'commander';
 import pc from 'picocolors';
 import { initCommand } from './commands/init.js';
@@ -19,7 +20,8 @@ import {
 } from './commands/config.js';
 import type { GlobalCliOptions } from './commands/shared.js';
 
-const VERSION = '0.3.0';
+const require = createRequire(import.meta.url);
+const { version: VERSION } = require('../package.json') as { version: string };
 
 function globalOpts(cmd: Command): GlobalCliOptions {
   const g = cmd.optsWithGlobals();
