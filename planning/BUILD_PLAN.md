@@ -63,3 +63,6 @@ Living document. Tracks the agentic build loop toward full PRD conformance, full
   can't parse postgres://mysql:// dotted-host URLs → hand-rolled DB-URL parser; git porcelain
   path-strip; allowFailure now absorbs spawn ENOENT so best-effort steps tolerate missing tools.
   85% line coverage. MVP complete per PRD §§6–12. Remaining: P16 optional live-account validation.
+- 2026-06-28: Handoff checkpoint for continuing on another laptop. Added DEVELOPMENT.md
+  (architecture map, dev-env setup, design decisions, gotchas, resume-on-another-machine steps).
+  Repo has no git remote yet — choose the destination account (personal vs company) before pushing.

@@ -144,6 +144,8 @@ The provider interfaces are exported from the package for type-safe authoring (`
 
 ## Development
 
+See [DEVELOPMENT.md](DEVELOPMENT.md) for the architecture map, dev-environment setup, design decisions, and handoff notes.
+
 ```bash
 npm install
 npm run typecheck
