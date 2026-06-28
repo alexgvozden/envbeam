@@ -105,33 +105,7 @@ export async function storageSetupCommand(opts: StorageSetupOptions): Promise<nu
       throw new EnvbeamError('Secret Access Key is required.', { exitCode: 2 });
     }
 
-    // 5. Generate age encryption keys
-    logger.raw('');
-    logger.info('Generating encryption keys…');
-
-    const ageInstalled = await runner.which('age-keygen');
-    if (!ageInstalled) {
-      throw new EnvbeamError(
-        'age-keygen not found. Install age: https://github.com/FiloSottile/age#installation',
-        { exitCode: 2 },
-      );
-    }
-
-    const keygenRes = await runner.run('age-keygen', [], { allowFailure: true });
-    if (keygenRes.code !== 0) {
-      throw new EnvbeamError(`Failed to generate age keys: ${keygenRes.stderr}`, { exitCode: 2 });
-    }
-
-    // Parse age-keygen output: public key is in stderr comment, private key is stdout
-    const privateKey = keygenRes.stdout.trim();
-    const pubKeyMatch = keygenRes.stderr.match(/public key: (age1[a-z0-9]+)/i);
-    if (!pubKeyMatch || !privateKey.startsWith('AGE-SECRET-KEY-')) {
-      throw new EnvbeamError('Failed to parse age-keygen output', { exitCode: 2 });
-    }
-    const publicKey = pubKeyMatch[1]!;
-    logger.sub(`Generated age key: ${publicKey.slice(0, 20)}...`);
-
-    // 6. Upload secrets to Doppler using `doppler secrets set`
+    // 5. Upload secrets to Doppler using `doppler secrets set`
     logger.raw('');
     logger.info('Storing credentials in Doppler…');
 
@@ -141,8 +115,6 @@ export async function storageSetupCommand(opts: StorageSetupOptions): Promise<nu
       ['ENVBEAM_S3_REGION', region],
       ['ENVBEAM_S3_ACCESS_KEY', accessKey],
       ['ENVBEAM_S3_SECRET_KEY', secretKey],
-      ['ENVBEAM_AGE_PUBLIC_KEY', publicKey],
-      ['ENVBEAM_AGE_PRIVATE_KEY', privateKey],
     ];
 
     // Use `doppler secrets set KEY=VALUE ...` to set multiple secrets
@@ -219,8 +191,6 @@ export async function storageStatusCommand(opts: GlobalCliOptions): Promise<numb
     let hasDopplerGlobal = false;
     let dopplerBucket: string | undefined;
     let dopplerEndpoint: string | undefined;
-    let hasEncryptionKeys = false;
-    let agePublicKey: string | undefined;
     const secretsRes = await runner.run(
       'doppler',
       ['secrets', '--project', DOPPLER_PROJECT, '--config', DOPPLER_CONFIG, '--json'],
@@ -232,8 +202,6 @@ export async function storageStatusCommand(opts: GlobalCliOptions): Promise<numb
         hasDopplerGlobal = Object.keys(secrets).some((k) => k.startsWith('ENVBEAM_S3_'));
         dopplerBucket = secrets['ENVBEAM_S3_BUCKET']?.computed;
         dopplerEndpoint = secrets['ENVBEAM_S3_ENDPOINT']?.computed;
-        hasEncryptionKeys = !!(secrets['ENVBEAM_AGE_PUBLIC_KEY']?.computed && secrets['ENVBEAM_AGE_PRIVATE_KEY']?.computed);
-        agePublicKey = secrets['ENVBEAM_AGE_PUBLIC_KEY']?.computed;
       } catch {
         /* ignore parse errors */
       }
@@ -260,17 +228,6 @@ export async function storageStatusCommand(opts: GlobalCliOptions): Promise<numb
       // No storage configured
       logger.raw(pc.yellow('!') + ' No storage configured.');
       logger.hint('Run `envbeam storage setup` to configure global S3 storage.');
-    }
-
-    // Encryption status
-    logger.raw('');
-    if (hasEncryptionKeys) {
-      const keyPreview = agePublicKey ? agePublicKey.slice(0, 15) + '...' : '';
-      logger.raw(pc.green('✓') + ` Encryption keys configured ${pc.dim(`(${keyPreview})`)}`);
-      logger.raw(pc.dim('  Session data will be encrypted with age.'));
-    } else if (hasDopplerGlobal) {
-      logger.raw(pc.yellow('!') + ' No encryption keys found.');
-      logger.hint('Re-run `envbeam storage setup` to generate age encryption keys.');
     }
 
     return 0;

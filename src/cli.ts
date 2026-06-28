@@ -19,6 +19,7 @@ import {
   configSyncCommand,
 } from './commands/config.js';
 import { storageSetupCommand, storageStatusCommand } from './commands/storage.js';
+import { sessionSetupCommand, sessionStatusCommand } from './commands/session.js';
 import type { GlobalCliOptions } from './commands/shared.js';
 
 const require = createRequire(import.meta.url);
@@ -169,6 +170,19 @@ async function main(): Promise<void> {
     .command('status')
     .description('Show current storage configuration')
     .action(async (_opts, cmd) => exit(await storageStatusCommand(globalOpts(cmd.parent))));
+
+  const session = program.command('session').description('Configure Claude session sync');
+  session
+    .command('setup')
+    .description('Set up Claude session sync (generates encryption keys, requires storage first)')
+    .option('--scope <scope>', 'session scope (project|workspace|global)')
+    .action(async (opts, cmd) =>
+      exit(await sessionSetupCommand({ ...globalOpts(cmd.parent), scope: opts.scope })),
+    );
+  session
+    .command('status')
+    .description('Show session sync configuration')
+    .action(async (_opts, cmd) => exit(await sessionStatusCommand(globalOpts(cmd.parent))));
 
   await program.parseAsync(process.argv);
 }
