@@ -5,6 +5,7 @@ import { EnvbeamError } from '../util/errors.js';
 import {
   type SnapshotEntry,
   type SyncTarget,
+  type SyncTargetStatus,
   parseSnapshotName,
   sortByTimestampDesc,
 } from './types.js';
@@ -40,6 +41,30 @@ export class S3Target implements SyncTarget {
     if (this.region) args.push('--region', this.region);
     if (this.profile) args.push('--profile', this.profile);
     return args;
+  }
+
+  async verify(ctx: ProviderContext): Promise<SyncTargetStatus> {
+    // Try head-bucket to verify credentials and bucket access
+    const res = await ctx.runner.run(
+      'aws',
+      ['s3api', 'head-bucket', '--bucket', this.bucket, ...this.baseArgs()],
+      { cwd: ctx.workspaceRoot, allowFailure: true },
+    );
+    if (res.code === 0) {
+      return { ok: true, detail: `bucket s3://${this.bucket} accessible` };
+    }
+    // Parse common errors
+    const stderr = res.stderr.toLowerCase();
+    if (stderr.includes('403') || stderr.includes('forbidden')) {
+      return { ok: false, detail: `access denied to bucket s3://${this.bucket}` };
+    }
+    if (stderr.includes('404') || stderr.includes('not found')) {
+      return { ok: false, detail: `bucket s3://${this.bucket} does not exist` };
+    }
+    if (stderr.includes('unable to locate credentials')) {
+      return { ok: false, detail: 'AWS credentials not configured' };
+    }
+    return { ok: false, detail: res.stderr.trim() || 'failed to access bucket' };
   }
 
   async put(ctx: ProviderContext, localFile: string, name: string): Promise<SnapshotEntry> {

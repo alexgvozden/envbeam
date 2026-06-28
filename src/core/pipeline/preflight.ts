@@ -1,7 +1,7 @@
 import type { RunContext } from './context.js';
 import { resolveActiveProviders } from './providers.js';
 import type { BaseProvider, ProviderContext, ProviderKind, ToolRequirement } from '../providers/types.js';
-import { syncTargetTools, requiredCryptoTools } from '../sync/index.js';
+import { syncTargetTools, requiredCryptoTools, createSyncTarget } from '../sync/index.js';
 
 export interface ToolCheck {
   command: string;
@@ -14,8 +14,15 @@ export interface ToolCheck {
   installHint: string;
 }
 
+export interface SyncCheck {
+  target: string;
+  ok: boolean;
+  detail?: string;
+}
+
 export interface PreflightReport {
   checks: ToolCheck[];
+  syncCheck?: SyncCheck;
   ok: boolean;
 }
 
@@ -56,6 +63,7 @@ export async function runPreflight(ctx: RunContext, opts: { auth?: boolean } = {
 
   // sync target + crypto tools (database concern)
   const sync = ctx.config.database?.sync;
+  let syncCheck: SyncCheck | undefined;
   if (sync) {
     const dbPctx = ctx.providerCtx('database');
     for (const cmd of [...syncTargetTools(sync), ...requiredCryptoTools(sync)]) {
@@ -71,10 +79,22 @@ export async function runPreflight(ctx: RunContext, opts: { auth?: boolean } = {
         ),
       );
     }
+
+    // Verify sync target connectivity
+    if (opts.auth) {
+      try {
+        const target = createSyncTarget(sync, ctx.identities.sync);
+        const status = await target.verify(dbPctx);
+        syncCheck = { target: sync.target, ok: status.ok, detail: status.detail };
+      } catch (e) {
+        syncCheck = { target: sync.target, ok: false, detail: (e as Error).message };
+      }
+    }
   }
 
-  const ok = checks.every((c) => c.present && (c.authChecked ? c.authOk !== false : true));
-  return { checks, ok };
+  const toolsOk = checks.every((c) => c.present && (c.authChecked ? c.authOk !== false : true));
+  const syncOk = syncCheck ? syncCheck.ok : true;
+  return { checks, syncCheck, ok: toolsOk && syncOk };
 }
 
 async function checkTool(

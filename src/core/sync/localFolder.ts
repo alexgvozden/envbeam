@@ -7,6 +7,7 @@ import { ensureDir, expandHome } from '../util/fs.js';
 import {
   type SnapshotEntry,
   type SyncTarget,
+  type SyncTargetStatus,
   parseSnapshotName,
   sortByTimestampDesc,
 } from './types.js';
@@ -32,6 +33,27 @@ export class LocalFolderTarget implements SyncTarget {
 
   private fullPath(ref: string): string {
     return path.join(this.dir, ref);
+  }
+
+  async verify(_ctx: ProviderContext): Promise<SyncTargetStatus> {
+    try {
+      // Check if directory exists or can be created
+      await ensureDir(this.dir);
+      // Try to write a test file to verify write access
+      const testFile = path.join(this.dir, '.envbeam-verify-test');
+      await fs.writeFile(testFile, 'test', { mode: 0o600 });
+      await fs.rm(testFile, { force: true });
+      return { ok: true, detail: `${this.kind} path ${this.dir} accessible` };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('EACCES') || msg.includes('permission denied')) {
+        return { ok: false, detail: `no write access to ${this.dir}` };
+      }
+      if (msg.includes('ENOENT')) {
+        return { ok: false, detail: `cannot create directory ${this.dir}` };
+      }
+      return { ok: false, detail: msg };
+    }
   }
 
   async put(_ctx: ProviderContext, localFile: string, name: string): Promise<SnapshotEntry> {

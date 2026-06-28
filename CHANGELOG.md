@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-06-28
+
+### Added
+- **Sync target verification in doctor** — `envbeam doctor` now verifies that the database snapshot sync target (S3, local-folder, syncthing) is accessible
+- **S3 bucket connectivity check** — verifies credentials and bucket access via `aws s3api head-bucket`
+- **Local folder write check** — verifies the snapshot directory exists and is writable
+
 ## [0.5.0] - 2026-06-28
 
 ### Added

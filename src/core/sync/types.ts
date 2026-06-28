@@ -11,9 +11,16 @@ export interface SnapshotEntry {
   sizeBytes?: number;
 }
 
+export interface SyncTargetStatus {
+  ok: boolean;
+  detail?: string;
+}
+
 /** Where DB snapshots live. The user owns this; envbeam has no backend (PRD §10). */
 export interface SyncTarget {
   readonly kind: 'local-folder' | 'syncthing' | 's3';
+  /** Verify the sync target is accessible (credentials, bucket exists, path writable). */
+  verify(ctx: ProviderContext): Promise<SyncTargetStatus>;
   /** Upload a local file under `name`; returns its ref. */
   put(ctx: ProviderContext, localFile: string, name: string): Promise<SnapshotEntry>;
   /** List snapshots for the current workspace, most recent first. */

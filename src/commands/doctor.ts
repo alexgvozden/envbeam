@@ -91,6 +91,15 @@ function printPreflight(logger: Logger, report: PreflightReport): void {
       logger.raw(`  ${pc.green('✓')} ${c.command}${v} ${pc.dim(`(${c.concern})`)}${auth}`);
     }
   }
+  // Sync target check
+  if (report.syncCheck) {
+    const sc = report.syncCheck;
+    if (sc.ok) {
+      logger.raw(`  ${pc.green('✓')} sync:${sc.target} ${pc.dim('(database snapshots)')} ${pc.dim('· ' + (sc.detail ?? 'accessible'))}`);
+    } else {
+      logger.raw(`  ${pc.red('✗')} sync:${sc.target} ${pc.dim('(database snapshots)')} — ${pc.red(sc.detail ?? 'not accessible')}`);
+    }
+  }
 }
 
 async function printBaselineTools(logger: Logger): Promise<void> {
