@@ -78,6 +78,7 @@ export async function initCommand(opts: InitOptions): Promise<number> {
     );
 
     let sessionScope: string = 'project';
+    let sessionEncryptKey: string = '';
     if (sessionProvider === 'claude-native') {
       sessionScope = await prompter.select(
         'Session scope',
@@ -88,6 +89,14 @@ export async function initCommand(opts: InitOptions): Promise<number> {
         ],
         'project',
       );
+      sessionEncryptKey = await prompter.input(
+        'Encryption key (age public key, e.g. age1...)',
+        '',
+      );
+      if (!sessionEncryptKey) {
+        logger.warn('Session sync requires an encryption key. Generate one with: age-keygen');
+        logger.hint('Add the public key (age1...) to session.sync.recipient in .envbeam.yaml');
+      }
     }
 
     const yaml = renderConfig({
@@ -100,6 +109,7 @@ export async function initCommand(opts: InitOptions): Promise<number> {
       dbProvider: hasDb ? String(dbField?.value) : undefined,
       sessionProvider,
       sessionScope,
+      sessionEncryptKey: sessionEncryptKey.trim() || undefined,
     });
 
     // validate before writing
@@ -122,6 +132,7 @@ interface RenderArgs {
   dbProvider?: string;
   sessionProvider: string;
   sessionScope: string;
+  sessionEncryptKey?: string;
 }
 
 function renderConfig(a: RenderArgs): string {
@@ -190,11 +201,14 @@ function renderConfig(a: RenderArgs): string {
     lines.push(`  provider: ${a.sessionProvider}`);
     lines.push(`  scope: ${a.sessionScope}          # project | workspace | global`);
     if (a.sessionProvider === 'claude-native') {
-      lines.push('  # sync: uses database.sync target if configured, or configure separately:');
-      lines.push('  # sync:');
-      lines.push('  #   target: s3');
-      lines.push('  #   encrypt: age          # recommended for session data');
-      lines.push('  #   recipient: age1...    # your age public key');
+      lines.push('  sync:                      # session data is always encrypted');
+      lines.push('    target: s3               # uses global storage from Doppler');
+      lines.push('    encrypt: age');
+      if (a.sessionEncryptKey) {
+        lines.push(`    recipient: ${a.sessionEncryptKey}`);
+      } else {
+        lines.push('    recipient: age1...       # REQUIRED: your age public key (age-keygen)');
+      }
     }
     lines.push('');
   }

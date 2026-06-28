@@ -156,20 +156,30 @@ export class ClaudeNativeProvider implements SessionProvider {
       return { action: 'noop', detail: `tar failed: ${tarRes.stderr}` };
     }
 
-    // Get sync config for encryption settings
+    // Get sync config - encryption is mandatory for session data
     const syncConfig: SyncConfig | undefined =
       ctx.config.session?.sync ?? ctx.config.database?.sync;
 
-    // Apply encryption if configured
-    const suffix = encryptionSuffix(syncConfig);
-    let uploadPath = archivePath;
-    let uploadName = archiveName;
-    if (suffix && syncConfig) {
-      uploadPath = archivePath + suffix;
-      uploadName = archiveName + suffix;
-      await encryptFile(ctx, syncConfig, archivePath, uploadPath);
-      ctx.logger.sub(`session encrypted with ${syncConfig.encrypt}`);
+    if (!syncConfig) {
+      return { action: 'noop', detail: 'no sync target configured' };
     }
+
+    // Enforce encryption for session data (contains sensitive conversation history)
+    const effectiveEncrypt = syncConfig.encrypt === 'none' ? 'age' : syncConfig.encrypt;
+    if (!syncConfig.recipient) {
+      return {
+        action: 'noop',
+        detail: 'session sync requires encryption: set sync.recipient (age public key or gpg key id)'
+      };
+    }
+
+    // Always encrypt session archives
+    const encryptedConfig: SyncConfig = { ...syncConfig, encrypt: effectiveEncrypt };
+    const suffix = effectiveEncrypt === 'age' ? '.age' : '.gpg';
+    const uploadPath = archivePath + suffix;
+    const uploadName = archiveName + suffix;
+    await encryptFile(ctx, encryptedConfig, archivePath, uploadPath);
+    ctx.logger.sub(`session encrypted with ${effectiveEncrypt}`);
 
     // Upload metadata separately (not encrypted - contains no sensitive data)
     const metaArchiveName = archiveName.replace('.tar.gz', '.meta.json');
@@ -229,24 +239,38 @@ export class ClaudeNativeProvider implements SessionProvider {
     const tempDir = path.join(os.tmpdir(), 'envbeam-session');
     await ensureDir(tempDir);
 
-    // Get sync config for decryption
+    // Get sync config - encryption is mandatory
     const syncConfig: SyncConfig | undefined =
       ctx.config.session?.sync ?? ctx.config.database?.sync;
-    const suffix = encryptionSuffix(syncConfig);
 
-    // Find the right file (with or without encryption suffix)
+    if (!syncConfig) {
+      return { action: 'noop', detail: 'no sync target configured' };
+    }
+
+    // Session files are always encrypted - find the encrypted version
+    const ageSuffix = '.age';
+    const gpgSuffix = '.gpg';
     let downloadName = latest.name;
-    if (suffix && !downloadName.endsWith(suffix)) {
-      // Look for encrypted version
-      const encryptedEntry = entries.find((e) => e.name === latest.name + suffix);
-      if (encryptedEntry) {
-        downloadName = encryptedEntry.name;
-      }
+    let decryptType: 'age' | 'gpg' = 'age';
+
+    // Look for encrypted versions
+    const ageEntry = entries.find((e) => e.name === latest.name + ageSuffix || e.name.endsWith(ageSuffix));
+    const gpgEntry = entries.find((e) => e.name === latest.name + gpgSuffix || e.name.endsWith(gpgSuffix));
+
+    if (ageEntry) {
+      downloadName = ageEntry.name;
+      decryptType = 'age';
+    } else if (gpgEntry) {
+      downloadName = gpgEntry.name;
+      decryptType = 'gpg';
+    } else {
+      return { action: 'noop', detail: 'no encrypted session archive found' };
     }
 
     const downloadPath = path.join(tempDir, downloadName);
-    const archivePath = path.join(tempDir, latest.name); // After decryption
-    const metaPath = path.join(tempDir, latest.name.replace('.tar.gz', '.meta.json'));
+    const archiveName = downloadName.replace(/\.(age|gpg)$/, '');
+    const archivePath = path.join(tempDir, archiveName);
+    const metaPath = path.join(tempDir, archiveName.replace('.tar.gz', '.meta.json'));
 
     try {
       await target.get(ctx, downloadName, downloadPath);
@@ -254,12 +278,11 @@ export class ClaudeNativeProvider implements SessionProvider {
       return { action: 'noop', detail: `download failed: ${(e as Error).message}` };
     }
 
-    // Decrypt if needed
-    if (downloadName.endsWith(suffix) && suffix && syncConfig) {
-      await decryptFile(ctx, syncConfig, downloadPath, archivePath);
-      await fs.rm(downloadPath, { force: true });
-      ctx.logger.sub(`session decrypted`);
-    }
+    // Always decrypt session archives
+    const decryptConfig: SyncConfig = { ...syncConfig, encrypt: decryptType };
+    await decryptFile(ctx, decryptConfig, downloadPath, archivePath);
+    await fs.rm(downloadPath, { force: true });
+    ctx.logger.sub(`session decrypted`);
 
     // Try to get metadata
     let metadata: { workspaceRoot?: string; remotePaths?: Record<string, string> } = {};
