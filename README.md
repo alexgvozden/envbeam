@@ -27,7 +27,7 @@ Requires Node ≥ 18. The tool shells out to the CLIs of whatever providers you 
 cd my-project
 envbeam init           # scaffold a commented .envbeam.yaml (detects what it can)
 envbeam doctor         # see detection + check required tools/auth
-envbeam identity add doppler:keeper --type doppler   # register an account once
+envbeam identity add doppler:personal --type doppler   # register an account once
 envbeam resume         # branch synced, secrets loaded, container up, session pulled
 # … work …
 envbeam pause          # commit/stash + push, optional DB snapshot, push session
@@ -73,9 +73,9 @@ Global flags: `--dry-run`, `-y/--yes`, `-v/--verbose`, `-q/--quiet`.
 
 ```yaml
 version: 1
-workspace: keeper-api
+workspace: my-app
 git: { identity: github:work }
-secrets: { provider: doppler, identity: doppler:keeper, project: keeper, config: dev }
+secrets: { provider: doppler, identity: doppler:personal, project: my-app, config: dev }
 database: { mode: snapshot, sync: { target: syncthing, path: ~/envbeam-snaps } }
 session: { provider: claude-sync }
 ```
@@ -91,7 +91,7 @@ Each concern routes through a **named identity**, so a work GitHub and a persona
 identities:
   github:work:      { type: git, sshHost: github-work }
   github:personal:  { type: git, sshHost: github-personal }
-  doppler:keeper:   { type: doppler }
+  doppler:personal: { type: doppler }
   s3:personal:      { type: s3, profile: personal }
 ```
 
