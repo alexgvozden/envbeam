@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-06-28
+
+### Added
+- **Native Claude session sync (`claude-native`)** — built-in session sync to S3/storage without external CLI
+- **Session scope options** — `project` (default, ~/.claude/projects/<path>/), `workspace` (.claude/ in repo), `global` (~/.claude/)
+- **Session encryption** — uses same age/gpg encryption as database snapshots for secure transfer
+- **Cross-machine path translation** — automatically translates workspace paths when restoring sessions from another machine
+- **`remotePaths` config** — map machine names to workspace paths for multi-machine setups
+
+### Changed
+- Session provider default changed from `claude-sync` to `none` (opt-in)
+- Session scope renamed from `sessions`/`full` to `project`/`workspace`/`global`
+- `envbeam init` now prompts for `claude-native` as the recommended session sync option
+
 ## [0.7.0] - 2026-06-28
 
 ### Added

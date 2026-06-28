@@ -141,11 +141,25 @@ export const databaseConfigSchema = z
 export const sessionConfigSchema = z
   .object({
     provider: z
-      .enum(['claude-sync', 'remote-control', 'none'])
-      .default('claude-sync'),
-    scope: z.enum(['sessions', 'full']).default('sessions'),
+      .enum(['claude-native', 'claude-sync', 'remote-control', 'none'])
+      .default('none')
+      .describe('Session sync provider: claude-native (built-in), claude-sync (external CLI), or none.'),
+    /** What to sync. */
+    scope: z
+      .enum(['project', 'workspace', 'global'])
+      .default('project')
+      .describe(
+        'project: ~/.claude/projects/<path>/ sessions only; ' +
+        'workspace: .claude/ folder in repo; ' +
+        'global: ~/.claude/ (tools, plugins, settings).',
+      ),
+    /** Sync target for session data (defaults to database.sync if configured). */
+    sync: syncConfigSchema.optional(),
     /** Remote project path mapping for cross-machine path translation. */
-    remotePath: z.string().optional(),
+    remotePaths: z
+      .record(z.string())
+      .optional()
+      .describe('Machine name → project path mapping for session path translation, e.g. {"laptop": "/home/user/project"}.'),
   })
   .strict();
 

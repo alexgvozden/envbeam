@@ -31,8 +31,12 @@ export class ClaudeSyncProvider implements SessionProvider {
     const args = ['--path', ctx.workspaceRoot];
     const scope = ctx.config.session?.scope;
     if (scope) args.push('--scope', scope);
-    const remotePath = ctx.config.session?.remotePath;
-    if (remotePath) args.push('--remote-path', remotePath);
+    // Pass first remote path if configured (legacy support)
+    const remotePaths = ctx.config.session?.remotePaths;
+    if (remotePaths) {
+      const firstRemote = Object.values(remotePaths)[0];
+      if (firstRemote) args.push('--remote-path', firstRemote);
+    }
     return args;
   }
 

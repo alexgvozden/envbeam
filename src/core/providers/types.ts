@@ -222,6 +222,7 @@ export interface DatabaseProvider extends BaseProvider {
 export interface SessionStatus {
   available: boolean;
   detail?: string;
+  syncConfigured?: boolean;
 }
 
 export interface SessionResult {

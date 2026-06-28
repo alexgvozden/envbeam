@@ -27,7 +27,7 @@ describe('config schema', () => {
     expect(cfg.git?.branch).toBe('current'); // default
     expect(cfg.database?.mode).toBe('snapshot');
     expect(cfg.database?.restore).toBe('prompt'); // default
-    expect(cfg.session?.scope).toBe('sessions'); // default
+    expect(cfg.session?.scope).toBe('project'); // default
   });
 
   it('rejects unknown top-level keys (strict)', () => {
@@ -70,7 +70,7 @@ describe('config schema', () => {
         snapshot: { dataOnly: true, compress: true, tables: { include: ['test_*'], exclude: ['audit_log'] }, changeDetection: true },
         sync: { target: 's3', identity: 's3:personal', bucket: 'b', maxSizeMB: 500, keep: 5 },
       },
-      session: { provider: 'claude-sync', scope: 'sessions' },
+      session: { provider: 'claude-sync', scope: 'project' },
     };
     expect(() => workspaceConfigSchema.parse(full)).not.toThrow();
   });

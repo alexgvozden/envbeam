@@ -82,13 +82,13 @@ describe('session providers', () => {
     cleanups.push(cleanup);
     const runner = new FakeRunner({ available: ['claude-sync'] });
     const provider = new ClaudeSyncProvider();
-    const ctx = makeTestContext({ config: { version: 1, workspace: 'w', session: { provider: 'claude-sync', scope: 'sessions' } }, runner, workspaceRoot: dir }).providerCtx('session');
+    const ctx = makeTestContext({ config: { version: 1, workspace: 'w', session: { provider: 'claude-sync', scope: 'project' } }, runner, workspaceRoot: dir }).providerCtx('session');
     const pull = await provider.pull(ctx);
     expect(pull.action).toBe('pulled');
     const push = await provider.push(ctx);
     expect(push.action).toBe('pushed');
     const pullCall = runner.callsTo('claude-sync')[0]!;
-    expect(pullCall.args).toEqual(['pull', '--path', dir, '--scope', 'sessions']);
+    expect(pullCall.args).toEqual(['pull', '--path', dir, '--scope', 'project']);
   });
 
   it('claude-sync reports failures as noop', async () => {

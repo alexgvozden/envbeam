@@ -69,12 +69,26 @@ export async function initCommand(opts: InitOptions): Promise<number> {
     const sessionProvider = await prompter.select(
       'Session sync',
       [
-        { name: 'claude-sync', value: 'claude-sync' },
+        { name: 'claude-native (built-in, syncs to S3)', value: 'claude-native' },
+        { name: 'claude-sync (external CLI)', value: 'claude-sync' },
         { name: 'remote-control (link only)', value: 'remote-control' },
         { name: 'none', value: 'none' },
       ],
-      'claude-sync',
+      'claude-native',
     );
+
+    let sessionScope: string = 'project';
+    if (sessionProvider === 'claude-native') {
+      sessionScope = await prompter.select(
+        'Session scope',
+        [
+          { name: 'project — ~/.claude/projects/<path>/ sessions only', value: 'project' },
+          { name: 'workspace — .claude/ folder in repo', value: 'workspace' },
+          { name: 'global — ~/.claude/ (tools, plugins, all sessions)', value: 'global' },
+        ],
+        'project',
+      );
+    }
 
     const yaml = renderConfig({
       workspace,
@@ -85,6 +99,7 @@ export async function initCommand(opts: InitOptions): Promise<number> {
       dbMode,
       dbProvider: hasDb ? String(dbField?.value) : undefined,
       sessionProvider,
+      sessionScope,
     });
 
     // validate before writing
@@ -106,6 +121,7 @@ interface RenderArgs {
   dbMode: string;
   dbProvider?: string;
   sessionProvider: string;
+  sessionScope: string;
 }
 
 function renderConfig(a: RenderArgs): string {
@@ -172,7 +188,14 @@ function renderConfig(a: RenderArgs): string {
   if (a.sessionProvider !== 'none') {
     lines.push('session:');
     lines.push(`  provider: ${a.sessionProvider}`);
-    lines.push('  scope: sessions');
+    lines.push(`  scope: ${a.sessionScope}          # project | workspace | global`);
+    if (a.sessionProvider === 'claude-native') {
+      lines.push('  # sync: uses database.sync target if configured, or configure separately:');
+      lines.push('  # sync:');
+      lines.push('  #   target: s3');
+      lines.push('  #   encrypt: age          # recommended for session data');
+      lines.push('  #   recipient: age1...    # your age public key');
+    }
     lines.push('');
   }
 

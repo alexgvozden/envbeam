@@ -16,7 +16,7 @@ describe('built-in registry', () => {
     expect(reg.list('secrets').sort()).toEqual(['doppler', 'onepassword']);
     expect(reg.list('container').sort()).toEqual(['compose', 'devcontainer']);
     expect(reg.list('database').sort()).toEqual(['mysql', 'postgres']);
-    expect(reg.list('session').sort()).toEqual(['claude-sync', 'none', 'remote-control']);
+    expect(reg.list('session').sort()).toEqual(['claude-native', 'claude-sync', 'none', 'remote-control']);
     expect(reg.create('database', 'postgres').name).toBe('postgres');
   });
 

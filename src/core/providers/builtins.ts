@@ -6,6 +6,7 @@ import { composeProviderFactory } from './container/compose.js';
 import { devcontainerProviderFactory } from './container/devcontainer.js';
 import { postgresProviderFactory } from './database/postgres.js';
 import { mysqlProviderFactory } from './database/mysql.js';
+import { claudeNativeProviderFactory } from './session/claudeNative.js';
 import { claudeSyncProviderFactory } from './session/claudeSync.js';
 import { remoteControlProviderFactory } from './session/remoteControl.js';
 import { noneSessionProviderFactory } from './session/none.js';
@@ -19,6 +20,7 @@ export const BUILTIN_FACTORIES = [
   devcontainerProviderFactory,
   postgresProviderFactory,
   mysqlProviderFactory,
+  claudeNativeProviderFactory,
   claudeSyncProviderFactory,
   remoteControlProviderFactory,
   noneSessionProviderFactory,
