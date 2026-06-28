@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { promises as fs } from 'node:fs';
 import { RealCommandRunner } from '../../src/core/util/exec.js';
 import { tmpDir, writeFiles } from '../helpers/context.js';
@@ -8,6 +9,8 @@ import { tmpDir, writeFiles } from '../helpers/context.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.resolve(here, '../../dist/cli.js');
 const runner = new RealCommandRunner();
+const require = createRequire(import.meta.url);
+const { version: PKG_VERSION } = require('../../package.json') as { version: string };
 
 let built = false;
 beforeAll(async () => {
@@ -48,7 +51,7 @@ describe('CLI end-to-end (compiled dist)', () => {
   it('reports version and help', async () => {
     if (!built) return;
     const { dir, home } = await ws();
-    expect((await eb(dir, home, '--version')).out.trim()).toBe('0.3.0');
+    expect((await eb(dir, home, '--version')).out.trim()).toBe(PKG_VERSION);
     const help = await eb(dir, home, '--help');
     expect(help.out).toMatch(/Beam your whole dev environment/);
     expect(help.out).toMatch(/resume[\s\S]*pause[\s\S]*doctor/);

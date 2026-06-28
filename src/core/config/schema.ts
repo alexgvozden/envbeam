@@ -47,6 +47,10 @@ export const secretsConfigSchema = z
       .string()
       .default('.env')
       .describe('Path (relative to workspace) for the gitignored dotenv file.'),
+    sync: z
+      .enum(['pull-only', 'two-way'])
+      .default('pull-only')
+      .describe('Sync mode: pull-only (provider is source of truth) or two-way (push local changes on pause).'),
   })
   .strict();
 

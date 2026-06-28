@@ -5,10 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-28
+
+### Added
+- **Two-way secrets sync** — new `sync: two-way` config option enables pushing local .env changes back to Doppler on `envbeam pause`
+- **Doppler push support** — `SecretsProvider.push()` method uploads local secrets to the provider
+- **Doppler auto-setup** — `SecretsProvider.setup()` method auto-creates Doppler projects and imports existing .env files
+
+### Changed
+- Secrets sync mode is now configurable: `pull-only` (default, provider is source of truth) or `two-way`
+
 ## [0.4.1] - 2026-06-28
 
 ### Fixed
 - CLI now reads version from package.json instead of hardcoded value
+- CLI integration test now reads expected version from package.json dynamically
 
 ## [0.4.0] - 2026-06-28
 

@@ -30,6 +30,7 @@ export interface PauseReport {
     skipped?: string;
     migrationsOnly: boolean;
   };
+  secrets?: { action: string; count: number; detail?: string };
   session?: { action: string; detail?: string };
   container?: { stopped: boolean };
 }
@@ -80,10 +81,22 @@ export async function runPause(ctx: RunContext, opts: PauseOptions): Promise<Pau
     log.sub(res.detail ?? res.action);
   }
 
-  // 4. Secrets — no push by default (source of truth is the provider)
+  // 4. Secrets — push if two-way sync is enabled
   if (active.secrets) {
     log.step('Secrets');
-    log.sub('not pushed (source of truth is your secrets provider)');
+    const syncMode = ctx.config.secrets?.sync ?? 'pull-only';
+    if (syncMode === 'two-way' && active.secrets.push) {
+      const pushRes = await active.secrets.push(ctx.providerCtx('secrets'));
+      report.secrets = { action: pushRes.action, count: pushRes.count, detail: pushRes.detail };
+      if (pushRes.action === 'uploaded') {
+        log.sub(pushRes.detail ?? `pushed ${pushRes.count} secret(s)`);
+      } else {
+        log.sub(pushRes.detail ?? pushRes.action);
+      }
+    } else {
+      report.secrets = { action: 'skipped', count: 0, detail: 'pull-only mode' };
+      log.sub('not pushed (sync: pull-only — provider is source of truth)');
+    }
   }
 
   // 5. Container — optionally stop
@@ -216,6 +229,13 @@ function printPauseReport(ctx: RunContext, report: PauseReport): void {
       report.database.snapshot
         ? `database:  snapshot ${report.database.snapshot.timestamp} pushed`
         : `database:  ${report.database.skipped ?? 'migrations-only'} (no snapshot)`,
+    );
+  }
+  if (report.secrets) {
+    lines.push(
+      report.secrets.action === 'uploaded'
+        ? `secrets:   ${report.secrets.count} secret(s) pushed`
+        : `secrets:   ${report.secrets.detail ?? report.secrets.action}`,
     );
   }
   if (report.session) lines.push(`session:   ${report.session.action}`);

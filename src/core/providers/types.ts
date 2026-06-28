@@ -117,11 +117,39 @@ export interface MaterializeResult {
   count: number;
 }
 
+export interface SecretsPushResult {
+  count: number;
+  keys: string[];
+  action: 'uploaded' | 'noop' | 'skipped';
+  detail?: string;
+}
+
+export interface SecretsSetupResult {
+  created: boolean;
+  project: string;
+  config: string;
+  imported: number;
+  detail?: string;
+}
+
+export interface SecretsSetupOptions {
+  /** Project name to create/use */
+  project: string;
+  /** Config name (e.g. dev, staging, prod) */
+  config: string;
+  /** Import secrets from existing .env file */
+  importEnv?: boolean;
+}
+
 export interface SecretsProvider extends BaseProvider {
   kind: 'secrets';
   pull(ctx: ProviderContext): Promise<SecretsPullResult>;
   materialize(ctx: ProviderContext, pulled: SecretsPullResult): Promise<MaterializeResult>;
   status(ctx: ProviderContext): Promise<SecretsStatus>;
+  /** Push local .env secrets back to the provider. Optional — not all providers support this. */
+  push?(ctx: ProviderContext): Promise<SecretsPushResult>;
+  /** Set up the provider (create project, import secrets). Optional — for init flow. */
+  setup?(ctx: ProviderContext, opts: SecretsSetupOptions): Promise<SecretsSetupResult>;
 }
 
 /* ------------------------------- container ------------------------------- */

@@ -93,6 +93,15 @@
               "type": "string",
               "default": ".env",
               "description": "Path (relative to workspace) for the gitignored dotenv file."
+            },
+            "sync": {
+              "type": "string",
+              "enum": [
+                "pull-only",
+                "two-way"
+              ],
+              "default": "pull-only",
+              "description": "Sync mode: pull-only (provider is source of truth) or two-way (push local changes on pause)."
             }
           },
           "required": [
