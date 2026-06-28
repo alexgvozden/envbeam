@@ -1,7 +1,46 @@
 import os from 'node:os';
+import { execSync } from 'node:child_process';
 import type { CommandRunner } from './exec.js';
 import type { Prompter } from './prompt.js';
 import type { Logger } from './logger.js';
+
+/**
+ * On Windows, refresh process.env.PATH from the registry.
+ * This allows us to see newly installed tools without restarting the terminal.
+ */
+function refreshPathOnWindows(): void {
+  if (os.platform() !== 'win32') return;
+
+  try {
+    // Read User PATH from registry
+    const userPath = execSync(
+      'reg query "HKCU\\Environment" /v Path',
+      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
+    )
+      .split('\n')
+      .find((line) => line.includes('REG_'))
+      ?.replace(/.*REG_[A-Z_]+\s+/, '')
+      .trim() ?? '';
+
+    // Read System PATH from registry
+    const systemPath = execSync(
+      'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment" /v Path',
+      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
+    )
+      .split('\n')
+      .find((line) => line.includes('REG_'))
+      ?.replace(/.*REG_[A-Z_]+\s+/, '')
+      .trim() ?? '';
+
+    // Combine and update process.env.PATH
+    const newPath = [systemPath, userPath].filter(Boolean).join(';');
+    if (newPath) {
+      process.env.PATH = newPath;
+    }
+  } catch {
+    // Ignore errors - fall back to existing PATH
+  }
+}
 
 export interface ToolDef {
   command: string;
@@ -162,6 +201,11 @@ export async function ensureTool(
     logger.error(`Installation failed. Please install manually:`);
     logger.raw(`  ${installCmd}`);
     return { installed: false, wasInstalled: false };
+  }
+
+  // On Windows, refresh PATH from registry to pick up newly installed tools
+  if (platform === 'win32') {
+    refreshPathOnWindows();
   }
 
   // Verify installation
