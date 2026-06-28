@@ -113,6 +113,13 @@ export async function initCommand(opts: InitOptions): Promise<number> {
       ],
       'doppler',
     );
+
+    // Ask about secrets sync mode
+    let secretsSync: 'pull-only' | 'two-way' = 'pull-only';
+    if (secretsProvider !== 'none') {
+      const twoWay = await prompter.confirm('Enable two-way secrets sync? (push local changes back)', false);
+      secretsSync = twoWay ? 'two-way' : 'pull-only';
+    }
     const containerMode = await prompter.select(
       'Container mode',
       [
@@ -145,6 +152,7 @@ export async function initCommand(opts: InitOptions): Promise<number> {
       gitIdentity: gitIdentity.trim() || undefined,
       gitRemote: detectedRemote,
       secretsProvider,
+      secretsSync,
       containerMode,
       dbMode,
       dbProvider: hasDb ? String(dbField?.value) : undefined,
@@ -167,6 +175,7 @@ interface RenderArgs {
   gitIdentity?: string;
   gitRemote: string;
   secretsProvider: string;
+  secretsSync: 'pull-only' | 'two-way';
   containerMode: string;
   dbMode: string;
   dbProvider?: string;
@@ -203,6 +212,7 @@ function renderConfig(a: RenderArgs): string {
       lines.push('  item: ' + a.workspace + '-env       # 1Password item whose fields are the env vars');
     }
     lines.push('  output: dotenv             # dotenv | run-wrapper');
+    lines.push(`  sync: ${a.secretsSync}            # pull-only | two-way`);
     lines.push('');
   }
 
@@ -240,8 +250,9 @@ function renderConfig(a: RenderArgs): string {
     lines.push(`  provider: ${a.sessionProvider}`);
     lines.push(`  scope: ${a.sessionScope}          # project | workspace | global`);
     if (a.sessionProvider === 'claude-native') {
-      lines.push('  # Encryption keys are stored in Doppler (envbeam-global project)');
-      lines.push('  # Run `envbeam storage setup` to configure storage and generate keys');
+      lines.push('  sync:');
+      lines.push('    target: s3               # uses global storage from `envbeam storage setup`');
+      lines.push('    encrypt: age             # encryption via age (keys in Doppler)');
     }
     lines.push('');
   }
