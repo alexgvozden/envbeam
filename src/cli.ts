@@ -18,6 +18,7 @@ import {
   configExplainCommand,
   configSyncCommand,
 } from './commands/config.js';
+import { storageSetupCommand, storageStatusCommand } from './commands/storage.js';
 import type { GlobalCliOptions } from './commands/shared.js';
 
 const require = createRequire(import.meta.url);
@@ -142,6 +143,32 @@ async function main(): Promise<void> {
     .description('Inspect the repo and propose config additions')
     .option('--write', 'apply the proposed additions')
     .action(async (opts, cmd) => exit(await configSyncCommand({ ...globalOpts(cmd.parent), write: opts.write })));
+
+  const storage = program.command('storage').description('Configure global S3-compatible storage for database snapshots');
+  storage
+    .command('setup')
+    .description('Set up S3-compatible storage (Hetzner, MinIO, AWS S3) and store credentials in Doppler')
+    .option('--endpoint <url>', 'S3 endpoint URL')
+    .option('--bucket <name>', 'bucket name')
+    .option('--region <region>', 'region')
+    .option('--access-key <key>', 'access key ID')
+    .option('--secret-key <key>', 'secret access key')
+    .action(async (opts, cmd) =>
+      exit(
+        await storageSetupCommand({
+          ...globalOpts(cmd.parent),
+          endpoint: opts.endpoint,
+          bucket: opts.bucket,
+          region: opts.region,
+          accessKey: opts.accessKey,
+          secretKey: opts.secretKey,
+        }),
+      ),
+    );
+  storage
+    .command('status')
+    .description('Show current storage configuration')
+    .action(async (_opts, cmd) => exit(await storageStatusCommand(globalOpts(cmd.parent))));
 
   await program.parseAsync(process.argv);
 }

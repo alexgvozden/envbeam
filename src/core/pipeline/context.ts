@@ -17,6 +17,7 @@ import { resolveOptionalIdentity } from '../identity/resolver.js';
 import type { ProviderContext, ProviderKind, ResolvedIdentity } from '../providers/types.js';
 import { parseDotenv } from '../providers/secrets/materialize.js';
 import { EnvbeamError } from '../util/errors.js';
+import { getGlobalStorageConfig, injectStorageEnv } from '../storage/global.js';
 
 export interface RunContextOptions {
   cwd?: string;
@@ -157,6 +158,15 @@ export async function buildRunContext(opts: RunContextOptions = {}): Promise<Run
   };
 
   const env = await readExistingDotenv(workspaceRoot, config);
+
+  // Auto-inject global storage config from Doppler if using S3 sync and env vars aren't set
+  if (config.database?.sync?.target === 's3' && !process.env.ENVBEAM_S3_ACCESS_KEY) {
+    const globalStorage = await getGlobalStorageConfig(runner);
+    if (globalStorage) {
+      injectStorageEnv(globalStorage);
+      logger.debug('Loaded global S3 storage config from Doppler');
+    }
+  }
 
   return new RunContext({
     workspaceRoot,
