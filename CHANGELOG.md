@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-06-28
+
+### Added
+- **Auto-install missing tools** — setup commands now prompt to install missing CLI tools (doppler, age, aws, git, docker, tar)
+- **Platform-specific install commands** — provides correct install instructions for Windows (winget), macOS (brew), and Linux (apt/curl)
+- **`ensureTools` helper** — reusable utility for checking and installing required tools
+
+### Changed
+- `envbeam storage setup` now checks for doppler and aws CLI before proceeding
+- `envbeam session setup` now checks for doppler and age-keygen before proceeding
+
 ## [0.8.0] - 2026-06-28
 
 ### Added
