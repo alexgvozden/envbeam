@@ -31,11 +31,12 @@ async function generateCommitMessage(
   const filesChanged = status.stdout.trim().split('\n').slice(0, 10).join('\n');
   const prompt = `Write a short git commit message (under 72 chars) for:\n${filesChanged}`;
 
-  // Use full path to claude to avoid spawn ENOENT issues
+  // Use shell on Windows to handle .cmd/.bat files
   const result = await ctx.runner.run(claudePath, ['-p', prompt], {
     cwd: ctx.workspaceRoot,
     allowFailure: true,
-    timeout: 60000, // Give it more time
+    timeout: 60000,
+    shell: process.platform === 'win32',
   });
 
   // Debug info

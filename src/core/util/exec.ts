@@ -13,6 +13,8 @@ export interface RunOptions {
   allowFailure?: boolean;
   /** Stream stdout/stderr to the parent's stdio instead of capturing. */
   inherit?: boolean;
+  /** Run command through shell (needed for .cmd/.bat on Windows). */
+  shell?: boolean;
 }
 
 export interface RunResult {
@@ -54,6 +56,7 @@ export class RealCommandRunner implements CommandRunner {
         stdio: options.inherit
           ? ['inherit', 'inherit', 'inherit']
           : [options.input != null ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        shell: options.shell,
       });
 
       let stdout = '';
