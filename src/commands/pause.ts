@@ -53,7 +53,7 @@ async function generateCommitMessage(
       .replace(/^(commit:?\s*)/i, '') // Remove "commit:" prefix if present
       .trim();
 
-    if (generated.length > 0 && generated.length <= 100) {
+    if (generated.length > 0) {
       logger.sub(pc.dim(`→ ${generated}`));
 
       // Let user confirm or edit
@@ -63,11 +63,9 @@ async function generateCommitMessage(
       }
       // If not confirmed, fall through to manual input with generated as default
       return prompter.input('Commit message', generated);
-    } else if (generated.length > 100) {
-      logger.sub(pc.dim(`Claude response too long (${generated.length} chars), using manual input`));
-    } else {
-      logger.sub(pc.dim(`Claude returned empty response: "${result.stdout.slice(0, 50)}"`));
     }
+  } else if (result.code === 0) {
+    logger.sub(pc.dim(`Claude returned empty response`));
   }
 
   // Fall back to manual input
