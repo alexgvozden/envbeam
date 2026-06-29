@@ -64,8 +64,16 @@ Idempotent. Supports `--dry-run`.
 | `envbeam init` | Interactive scaffold of `.envbeam.yaml`. |
 | `envbeam identity add\|list\|test\|remove` | Manage named accounts (credentials go to the OS keychain / a 0600 file, **never** the repo). |
 | `envbeam config validate\|explain\|sync` | Validate against the JSON Schema, explain fields, or inspect the repo and propose config additions (`--write`). |
+| `envbeam storage setup\|status` | Configure global S3-compatible storage (for the cross-machine project registry and session/DB sync). See below. |
+| `envbeam list\|pull <project>\|delete <project>` | List registered projects across machines, bootstrap any of them locally, or remove one from the registry. |
 
 Global flags: `--dry-run`, `-y/--yes`, `-v/--verbose`, `-q/--quiet`.
+
+### Storage (`envbeam storage setup`)
+
+Optional global storage powers the cross-machine project registry and S3-based session/DB sync. It works with **any S3-compatible provider** — the setup wizard asks which one you use (Cloudflare R2, Hetzner Object Storage, Backblaze B2, AWS S3, or any other) and pre-fills the endpoint and region; AWS S3 needs no custom endpoint. The AWS CLI is installed only as the generic S3 client — it does not imply AWS is your backend.
+
+Credentials are stored as `ENVBEAM_S3_*` secrets in the `envbeam-global` Doppler project. If those already exist, both `envbeam storage setup` and `envbeam init` offer to **reuse them** instead of re-entering anything. For non-interactive setup, pass `--endpoint`, `--bucket`, `--region`, `--access-key`, and `--secret-key`.
 
 ## Configuration
 

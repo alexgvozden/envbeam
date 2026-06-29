@@ -9,8 +9,11 @@ import { detectedValue, getField } from '../core/detect/types.js';
 import { parseConfig } from '../core/config/load.js';
 import { loadGlobalConfig } from '../core/config/globalConfig.js';
 import { RealCommandRunner } from '../core/util/exec.js';
-import { RegistryStore, type ProjectEntry } from '../core/registry/index.js';
+import { RegistryStore, saveStorageConfig, type ProjectEntry } from '../core/registry/index.js';
+import { ensureTools } from '../core/util/tools.js';
 import { getMachineId } from '../core/util/machine.js';
+import type { GlobalStorageConfig } from '../core/config/schema.js';
+import { readExistingDopplerStorage } from './storage.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
 
 /**
@@ -172,10 +175,46 @@ export async function initCommand(opts: InitOptions): Promise<number> {
 
     // Auto-register project if global storage is configured
     const globalConfig = await loadGlobalConfig();
-    if (globalConfig.storage) {
+    let storageConfig: GlobalStorageConfig | undefined = globalConfig.storage;
+
+    // If storage isn't configured yet but the user picked Doppler and already has
+    // ENVBEAM_S3_* settings there, offer to import them instead of making them
+    // re-run `envbeam storage setup` from scratch.
+    if (!storageConfig && secretsProvider === 'doppler') {
+      const runner = new RealCommandRunner();
+      const existing = await readExistingDopplerStorage(runner).catch(() => null);
+      if (existing) {
+        logger.raw('');
+        logger.sub(pc.dim(`Found existing storage settings in Doppler (bucket: ${existing.bucket}).`));
+        const useExisting = await prompter.confirm('Use these existing storage settings for this project?', true);
+        if (useExisting) {
+          const aws = await ensureTools(['aws'], runner, logger, prompter);
+          if (aws.allInstalled) {
+            storageConfig = {
+              type: 's3',
+              bucket: existing.bucket,
+              region: existing.region,
+              ...(existing.endpoint ? { endpoint: existing.endpoint } : {}),
+              credentialSource: 'doppler',
+            };
+            await saveStorageConfig(storageConfig);
+            process.env.ENVBEAM_S3_ACCESS_KEY = existing.accessKey;
+            process.env.ENVBEAM_S3_SECRET_KEY = existing.secretKey;
+            process.env.ENVBEAM_S3_BUCKET = existing.bucket;
+            process.env.ENVBEAM_S3_REGION = existing.region;
+            if (existing.endpoint) process.env.ENVBEAM_S3_ENDPOINT = existing.endpoint;
+            logger.success('Imported storage settings from Doppler.');
+          } else {
+            logger.warn('AWS CLI is required to use storage; skipping import.');
+          }
+        }
+      }
+    }
+
+    if (storageConfig) {
       try {
         const runner = new RealCommandRunner();
-        const store = new RegistryStore(globalConfig.storage, runner);
+        const store = new RegistryStore(storageConfig, runner);
 
         // Check for name conflict
         const existing = await store.getProject(workspace);

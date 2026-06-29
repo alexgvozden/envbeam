@@ -169,7 +169,7 @@ async function main(): Promise<void> {
   const storage = program.command('storage').description('Configure global S3-compatible storage for database snapshots');
   storage
     .command('setup')
-    .description('Set up S3-compatible storage (Hetzner, MinIO, AWS S3) and store credentials in Doppler')
+    .description('Set up S3-compatible storage (Cloudflare R2, Hetzner, Backblaze, AWS S3, or any other) and store credentials in Doppler')
     .option('--endpoint <url>', 'S3 endpoint URL')
     .option('--bucket <name>', 'bucket name')
     .option('--region <region>', 'region')

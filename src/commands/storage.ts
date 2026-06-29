@@ -19,8 +19,77 @@ const DOPPLER_PROJECT = 'envbeam-global';
 const DOPPLER_CONFIG = 'prd';
 
 /**
+ * Known S3-compatible storage providers. envbeam works with ANY S3-compatible
+ * service — these presets just pre-fill the endpoint/region so the user doesn't
+ * have to look them up. "custom" covers anything not listed (MinIO, Ceph, etc.).
+ * The AWS CLI is used as the S3 client for all of them; it is not tied to AWS S3.
+ */
+interface StorageProvider {
+  value: string;
+  name: string;
+  /** Example endpoint shown as the input default/placeholder. Empty = use AWS default endpoint. */
+  endpointHint: string;
+  /** Default region. */
+  region: string;
+}
+
+const STORAGE_PROVIDERS: StorageProvider[] = [
+  { value: 'r2', name: 'Cloudflare R2', endpointHint: 'https://<account-id>.r2.cloudflarestorage.com', region: 'auto' },
+  { value: 'hetzner', name: 'Hetzner Object Storage', endpointHint: 'https://fsn1.your-objectstorage.com', region: 'fsn1' },
+  { value: 'b2', name: 'Backblaze B2', endpointHint: 'https://s3.us-west-004.backblazeb2.com', region: 'us-west-004' },
+  { value: 'aws', name: 'AWS S3', endpointHint: '', region: 'us-east-1' },
+  { value: 'custom', name: 'Other S3-compatible (MinIO, Ceph, …)', endpointHint: 'https://s3.example.com', region: 'auto' },
+];
+
+interface S3Credentials {
+  endpoint: string;
+  bucket: string;
+  region: string;
+  accessKey: string;
+  secretKey: string;
+}
+
+/**
+ * Read existing ENVBEAM_S3_* secrets from the global Doppler project, if any.
+ * Returns null when no usable storage config is present.
+ */
+export async function readExistingDopplerStorage(
+  runner: RealCommandRunner,
+): Promise<S3Credentials | null> {
+  const res = await runner.run(
+    'doppler',
+    ['secrets', '--project', DOPPLER_PROJECT, '--config', DOPPLER_CONFIG, '--json'],
+    { allowFailure: true },
+  );
+  if (res.code !== 0) return null;
+  let parsed: Record<string, { computed?: string }>;
+  try {
+    parsed = JSON.parse(res.stdout) as Record<string, { computed?: string }>;
+  } catch {
+    return null;
+  }
+  const get = (k: string) => parsed[k]?.computed ?? '';
+  const bucket = get('ENVBEAM_S3_BUCKET');
+  const accessKey = get('ENVBEAM_S3_ACCESS_KEY');
+  const secretKey = get('ENVBEAM_S3_SECRET_KEY');
+  // Need at least a bucket + credentials to count as configured.
+  if (!bucket || !accessKey || !secretKey) return null;
+  return {
+    endpoint: get('ENVBEAM_S3_ENDPOINT'),
+    bucket,
+    region: get('ENVBEAM_S3_REGION') || 'auto',
+    accessKey,
+    secretKey,
+  };
+}
+
+/**
  * `envbeam storage setup` — configure global S3-compatible storage for database snapshots.
- * Stores credentials in Doppler under the envbeam-global project.
+ *
+ * Works with any S3-compatible provider (Cloudflare R2, Hetzner, Backblaze B2,
+ * AWS S3, MinIO, …); a provider picker pre-fills the endpoint/region. The AWS CLI
+ * is used purely as the S3 client. Credentials are stored in Doppler under the
+ * envbeam-global project, and existing ENVBEAM_S3_* settings there can be reused.
  */
 export async function storageSetupCommand(opts: StorageSetupOptions): Promise<number> {
   const logger = makeLogger(opts);
@@ -29,11 +98,13 @@ export async function storageSetupCommand(opts: StorageSetupOptions): Promise<nu
   return runCommand(logger, async () => {
     const runner = new RealCommandRunner();
 
-    // 1. Check required tools
+    // 1. Ensure Doppler (where credentials are stored). The AWS CLI is checked
+    //    later, once we know we're proceeding — it's the S3 client for whatever
+    //    provider you choose, not a sign that AWS S3 is assumed.
     logger.info('Checking required tools…');
-    const { allInstalled, missing } = await ensureTools(['doppler', 'aws'], runner, logger, prompter);
-    if (!allInstalled) {
-      throw new EnvbeamError(`Missing required tools: ${missing.join(', ')}`, { exitCode: 2 });
+    const dopplerTool = await ensureTools(['doppler'], runner, logger, prompter);
+    if (!dopplerTool.allInstalled) {
+      throw new EnvbeamError(`Missing required tools: ${dopplerTool.missing.join(', ')}`, { exitCode: 2 });
     }
 
     // 2. Check Doppler is authenticated
@@ -65,72 +136,117 @@ export async function storageSetupCommand(opts: StorageSetupOptions): Promise<nu
       logger.sub(pc.dim(`Project "${DOPPLER_PROJECT}" already exists.`));
     }
 
-    // 4. Collect S3 credentials
-    logger.raw('');
-    logger.raw(pc.bold('S3-compatible Storage Configuration'));
-    logger.raw(pc.dim('For Hetzner Object Storage, MinIO, or other S3-compatible services.'));
-    logger.raw('');
+    // 4. Determine S3 credentials — either reuse what's already in Doppler,
+    //    or collect fresh ones after picking a provider.
+    let endpoint = '';
+    let bucket = '';
+    let region = 'auto';
+    let accessKey = '';
+    let secretKey = '';
+    let reusedExisting = false;
 
-    let endpoint =
-      opts.endpoint ??
-      (await prompter.input(
-        'S3 endpoint URL (e.g. https://fsn1.your-objectstorage.com)',
-        '',
-      ));
-    if (!endpoint) {
-      throw new EnvbeamError('Endpoint is required for S3-compatible storage.', { exitCode: 2 });
-    }
-    // Auto-add https:// if no protocol specified
-    if (!endpoint.startsWith('http://') && !endpoint.startsWith('https://')) {
-      endpoint = `https://${endpoint}`;
-    }
+    // Any credential passed on the CLI means non-interactive intent; skip reuse.
+    const hasCliCreds =
+      opts.endpoint || opts.bucket || opts.region || opts.accessKey || opts.secretKey;
 
-    const bucket =
-      opts.bucket ?? (await prompter.input('Bucket name', ''));
-    if (!bucket) {
-      throw new EnvbeamError('Bucket name is required.', { exitCode: 2 });
-    }
-
-    const region =
-      opts.region ?? (await prompter.input('Region (e.g. fsn1, us-east-1)', 'auto'));
-
-    const accessKey =
-      opts.accessKey ?? (await prompter.input('Access Key ID', ''));
-    if (!accessKey) {
-      throw new EnvbeamError('Access Key ID is required.', { exitCode: 2 });
+    if (!hasCliCreds) {
+      const existing = await readExistingDopplerStorage(runner);
+      if (existing) {
+        logger.raw('');
+        logger.raw(pc.bold('Existing storage settings found in Doppler'));
+        logger.raw(pc.dim(`  Bucket:   ${existing.bucket}`));
+        logger.raw(pc.dim(`  Endpoint: ${existing.endpoint || '(AWS default)'}`));
+        logger.raw(pc.dim(`  Region:   ${existing.region}`));
+        logger.raw('');
+        const reuse = await prompter.confirm('Use these existing storage settings?', true);
+        if (reuse) {
+          ({ endpoint, bucket, region, accessKey, secretKey } = existing);
+          reusedExisting = true;
+        }
+      }
     }
 
-    const secretKey =
-      opts.secretKey ?? (await prompter.password('Secret Access Key'));
-    if (!secretKey) {
-      throw new EnvbeamError('Secret Access Key is required.', { exitCode: 2 });
+    if (!reusedExisting) {
+      logger.raw('');
+      logger.raw(pc.bold('S3-compatible Storage Configuration'));
+      logger.raw(pc.dim('envbeam works with any S3-compatible service. Pick yours to pre-fill the'));
+      logger.raw(pc.dim('endpoint (the AWS CLI is used as the S3 client for all of them).'));
+      logger.raw('');
+
+      const providerId =
+        hasCliCreds
+          ? 'custom'
+          : await prompter.select(
+              'Storage provider',
+              STORAGE_PROVIDERS.map((p) => ({ name: p.name, value: p.value })),
+              'r2',
+            );
+      const provider = STORAGE_PROVIDERS.find((p) => p.value === providerId) ?? STORAGE_PROVIDERS[4]!;
+
+      endpoint = opts.endpoint ?? (await prompter.input('S3 endpoint URL', provider.endpointHint));
+      // AWS S3 needs no custom endpoint; everything else does.
+      if (!endpoint && provider.value !== 'aws') {
+        throw new EnvbeamError('Endpoint is required for S3-compatible storage.', { exitCode: 2 });
+      }
+      // Auto-add https:// if no protocol specified
+      if (endpoint && !endpoint.startsWith('http://') && !endpoint.startsWith('https://')) {
+        endpoint = `https://${endpoint}`;
+      }
+
+      bucket = opts.bucket ?? (await prompter.input('Bucket name', ''));
+      if (!bucket) {
+        throw new EnvbeamError('Bucket name is required.', { exitCode: 2 });
+      }
+
+      region = opts.region ?? (await prompter.input('Region (e.g. fsn1, us-east-1)', provider.region));
+
+      accessKey = opts.accessKey ?? (await prompter.input('Access Key ID', ''));
+      if (!accessKey) {
+        throw new EnvbeamError('Access Key ID is required.', { exitCode: 2 });
+      }
+
+      secretKey = opts.secretKey ?? (await prompter.password('Secret Access Key'));
+      if (!secretKey) {
+        throw new EnvbeamError('Secret Access Key is required.', { exitCode: 2 });
+      }
     }
 
-    // 5. Upload secrets to Doppler using `doppler secrets set`
-    logger.raw('');
-    logger.info('Storing credentials in Doppler…');
-
-    const secrets: Array<[string, string]> = [
-      ['ENVBEAM_S3_ENDPOINT', endpoint],
-      ['ENVBEAM_S3_BUCKET', bucket],
-      ['ENVBEAM_S3_REGION', region],
-      ['ENVBEAM_S3_ACCESS_KEY', accessKey],
-      ['ENVBEAM_S3_SECRET_KEY', secretKey],
-    ];
-
-    // Use `doppler secrets set KEY=VALUE ...` to set multiple secrets
-    const secretArgs = secrets.map(([k, v]) => `${k}=${v}`);
-    const uploadRes = await runner.run(
-      'doppler',
-      ['secrets', 'set', '--project', DOPPLER_PROJECT, '--config', DOPPLER_CONFIG, ...secretArgs],
-      { allowFailure: true },
-    );
-
-    if (uploadRes.code !== 0) {
-      throw new EnvbeamError(`Failed to upload secrets to Doppler: ${uploadRes.stderr}`, { exitCode: 2 });
+    // 5. Ensure the AWS CLI (S3 client) now that we're committed to proceeding.
+    const awsTool = await ensureTools(['aws'], runner, logger, prompter);
+    if (!awsTool.allInstalled) {
+      throw new EnvbeamError(`Missing required tools: ${awsTool.missing.join(', ')}`, { exitCode: 2 });
     }
 
-    // 6. Test connectivity
+    // 6. Upload secrets to Doppler (skip when reusing what's already there).
+    if (!reusedExisting) {
+      logger.raw('');
+      logger.info('Storing credentials in Doppler…');
+
+      const secrets: Array<[string, string]> = [
+        ['ENVBEAM_S3_ENDPOINT', endpoint],
+        ['ENVBEAM_S3_BUCKET', bucket],
+        ['ENVBEAM_S3_REGION', region],
+        ['ENVBEAM_S3_ACCESS_KEY', accessKey],
+        ['ENVBEAM_S3_SECRET_KEY', secretKey],
+      ];
+
+      // Use `doppler secrets set KEY=VALUE ...` to set multiple secrets,
+      // skipping empties (e.g. endpoint when using native AWS S3).
+      const secretArgs = secrets.filter(([, v]) => v !== '').map(([k, v]) => `${k}=${v}`);
+      const uploadRes = await runner.run(
+        'doppler',
+        ['secrets', 'set', '--project', DOPPLER_PROJECT, '--config', DOPPLER_CONFIG, ...secretArgs],
+        { allowFailure: true },
+      );
+
+      if (uploadRes.code !== 0) {
+        throw new EnvbeamError(`Failed to upload secrets to Doppler: ${uploadRes.stderr}`, { exitCode: 2 });
+      }
+    } else {
+      logger.sub(pc.dim('Reusing existing Doppler credentials — nothing to upload.'));
+    }
+
+    // 7. Test connectivity
     logger.info('Testing S3 connectivity…');
     const testRes = await runner.run(
       'aws',
@@ -139,8 +255,7 @@ export async function storageSetupCommand(opts: StorageSetupOptions): Promise<nu
         'head-bucket',
         '--bucket',
         bucket,
-        '--endpoint-url',
-        endpoint,
+        ...(endpoint ? ['--endpoint-url', endpoint] : []),
         '--region',
         region,
       ],
@@ -160,25 +275,25 @@ export async function storageSetupCommand(opts: StorageSetupOptions): Promise<nu
       logger.hint('Credentials were saved. You may need to check bucket permissions or endpoint URL.');
     }
 
-    // 7. Save storage config to global config
+    // 8. Save storage config to global config
     logger.info('Saving storage configuration…');
     const storageConfig: GlobalStorageConfig = {
       type: 's3',
       bucket,
       region,
-      endpoint,
+      ...(endpoint ? { endpoint } : {}),
       credentialSource: 'doppler',
     };
     await saveStorageConfig(storageConfig);
 
-    // 8. Initialize registry in S3
+    // 9. Initialize registry in S3
     logger.info('Initializing project registry…');
     const registryStore = new RegistryStore(storageConfig, runner);
 
     // Temporarily set env vars for registry initialization
     process.env.ENVBEAM_S3_ACCESS_KEY = accessKey;
     process.env.ENVBEAM_S3_SECRET_KEY = secretKey;
-    process.env.ENVBEAM_S3_ENDPOINT = endpoint;
+    if (endpoint) process.env.ENVBEAM_S3_ENDPOINT = endpoint;
     process.env.ENVBEAM_S3_BUCKET = bucket;
     process.env.ENVBEAM_S3_REGION = region;
 

@@ -4,21 +4,20 @@ Working notes for continuing development across machines. If you just want to *u
 
 ---
 
-## Current status (2026-06-28)
+## Current status (2026-06-29)
 
-**MVP complete and green.** Everything in PRD §§6–12 is implemented and tested.
+**MVP complete and green; cross-machine registry shipped (v0.10.0).** Everything in PRD §§6–12 is implemented and tested.
 
-- 59 source files, 19 test files, **134 tests passing**, ~85% line coverage.
+- 19 test files, **134 tests passing**, ~85% line coverage.
 - `npm run typecheck`, `npm run build`, `npm test` all pass.
-- 4 logical commits on branch `master`; clean working tree.
-- **No git remote yet** — pick a destination before pushing (see [Resuming on another machine](#resuming-on-another-machine)).
 
 ### Done
-- Two pipelines (`resume`, `pause`) + `status`, all `--dry-run` capable.
-- Commands: `init`, `resume`, `pause`, `status`, `doctor`, `identity add/list/test/remove`, `config validate/explain/sync`.
+- Two pipelines (`resume`/`pull`, `pause`/`push`) + `status`, all `--dry-run` capable.
+- Commands: `init`, `resume`, `pause`, `status`, `doctor`, `identity add/list/test/remove`, `config validate/explain/sync`, `storage setup/status`, `session setup/status`, `list`, `pull <project>`, `delete <project>`.
 - Providers (all behind swappable interfaces, plugin-loadable): git · doppler · onepassword · devcontainer · compose · postgres · mysql · claude-sync · remote-control · none.
 - Sync targets: local-folder · syncthing · s3, with optional age/gpg at-rest encryption.
 - Detect-first config (zod schema + published JSON Schema), global identities, OS-keychain/file credential store.
+- Cross-machine project registry in S3 (v0.9.0); `envbeam storage setup` is provider-agnostic (R2/Hetzner/Backblaze/AWS/any S3) with reuse of existing Doppler `ENVBEAM_S3_*` settings, mirrored as an import offer in `envbeam init` (v0.10.0).
 
 ### Pending / next
 - **P16 — live-account validation (optional).** Everything is tested via an injectable command runner + Docker-backed Postgres/Compose/Dev Containers. Validating against *real* accounts needs: a Doppler service token + project/config; a 1Password `OP_SERVICE_ACCOUNT_TOKEN`; S3 creds + bucket (only for live S3 — local-folder/Syncthing need nothing); and how `claude-sync` is installed/authenticated.

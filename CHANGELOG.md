@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-06-29
+
+### Added
+- **Storage provider picker** — `envbeam storage setup` now asks which S3-compatible provider you use (Cloudflare R2, Hetzner, Backblaze B2, AWS S3, or any other) and pre-fills the endpoint and region accordingly. AWS S3 no longer requires a custom endpoint.
+- **Reuse existing Doppler storage settings** — if `ENVBEAM_S3_*` secrets already exist in the `envbeam-global` Doppler project, setup offers to reuse them instead of re-entering credentials.
+- **Import storage during `envbeam init`** — when the Doppler secrets provider is selected and no global storage is configured yet, init offers to import existing storage settings from Doppler so projects auto-register without a separate setup step.
+
+### Changed
+- **`envbeam storage setup` no longer assumes AWS** — the AWS CLI (used purely as the S3 client for any provider) is now checked only after you choose to proceed, with Doppler verified first. The wizard makes clear envbeam works with any S3-compatible storage.
+
 ## [0.9.0] - 2026-06-29
 
 ### Added
