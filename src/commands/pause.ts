@@ -46,17 +46,18 @@ ${diffContent}
 
 Commit message:`;
 
-  // Use shell on Windows to handle .cmd/.bat files
-  const result = await ctx.runner.run(claudePath, ['-p', prompt], {
+  // Use stdin piping for the prompt to avoid shell escaping issues with newlines
+  const result = await ctx.runner.run(claudePath, ['-p'], {
     cwd: ctx.workspaceRoot,
     allowFailure: true,
     timeout: 60000,
     shell: process.platform === 'win32',
+    input: prompt,
   });
 
-  // Debug info
-  if (result.code !== 0 || !result.stdout.trim()) {
-    const debugInfo = `code=${result.code}, stdout=${result.stdout.length}b, stderr=${result.stderr.slice(0, 100)}`;
+  // Debug info on failure
+  if (result.code !== 0) {
+    const debugInfo = `code=${result.code}, stderr=${result.stderr.slice(0, 100)}`;
     logger.sub(pc.dim(`Claude: ${debugInfo}`));
   }
 
