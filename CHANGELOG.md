@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **`envbeam storage setup` no longer assumes AWS** — the AWS CLI (used purely as the S3 client for any provider) is now checked only after you choose to proceed, with Doppler verified first. The wizard makes clear envbeam works with any S3-compatible storage.
 
+### Tests
+- Added unit coverage for `readExistingDopplerStorage` (the Doppler reuse-detection logic shared by `storage setup` and `init`): full credentials, AWS-style missing endpoint/region defaults, missing required secrets, command failure, and unparseable output.
+
 ## [0.9.0] - 2026-06-29
 
 ### Added

@@ -1,5 +1,5 @@
 import pc from 'picocolors';
-import { RealCommandRunner } from '../core/util/exec.js';
+import { RealCommandRunner, type CommandRunner } from '../core/util/exec.js';
 import { EnvbeamError } from '../core/util/errors.js';
 import { ensureTools } from '../core/util/tools.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
@@ -54,7 +54,7 @@ interface S3Credentials {
  * Returns null when no usable storage config is present.
  */
 export async function readExistingDopplerStorage(
-  runner: RealCommandRunner,
+  runner: CommandRunner,
 ): Promise<S3Credentials | null> {
   const res = await runner.run(
     'doppler',

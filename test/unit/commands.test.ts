@@ -6,7 +6,12 @@ import { configValidateCommand, configExplainCommand, configSyncCommand } from '
 import { identityAddCommand, identityListCommand, identityRemoveCommand, identityTestCommand } from '../../src/commands/identity.js';
 import { doctorCommand } from '../../src/commands/doctor.js';
 import { statusCommand } from '../../src/commands/status.js';
+import { readExistingDopplerStorage } from '../../src/commands/storage.js';
 import { tmpDir, writeFiles } from '../helpers/context.js';
+import { FakeRunner } from '../helpers/fakeRunner.js';
+
+const DOPPLER_SECRETS = 'doppler secrets --project envbeam-global --config prd --json';
+const dopplerSecret = (computed: string) => ({ computed });
 
 const cleanups: Array<() => Promise<void>> = [];
 let originalCwd: string;
@@ -119,6 +124,61 @@ describe('identity command', () => {
 
     expect(await identityRemoveCommand('github:work', {})).toBe(0);
     expect(await identityRemoveCommand('github:work', {})).toBe(1);
+  });
+});
+
+describe('readExistingDopplerStorage', () => {
+  const fullSecrets = {
+    ENVBEAM_S3_ENDPOINT: dopplerSecret('https://fsn1.your-objectstorage.com'),
+    ENVBEAM_S3_BUCKET: dopplerSecret('my-bucket'),
+    ENVBEAM_S3_REGION: dopplerSecret('fsn1'),
+    ENVBEAM_S3_ACCESS_KEY: dopplerSecret('AKIA'),
+    ENVBEAM_S3_SECRET_KEY: dopplerSecret('shhh'),
+  };
+
+  it('returns parsed credentials when all required secrets are present', async () => {
+    const runner = new FakeRunner().on(DOPPLER_SECRETS, { stdout: JSON.stringify(fullSecrets) });
+    expect(await readExistingDopplerStorage(runner)).toEqual({
+      endpoint: 'https://fsn1.your-objectstorage.com',
+      bucket: 'my-bucket',
+      region: 'fsn1',
+      accessKey: 'AKIA',
+      secretKey: 'shhh',
+    });
+  });
+
+  it('defaults region to "auto" and endpoint to "" when absent (e.g. native AWS S3)', async () => {
+    const runner = new FakeRunner().on(DOPPLER_SECRETS, {
+      stdout: JSON.stringify({
+        ENVBEAM_S3_BUCKET: dopplerSecret('aws-bucket'),
+        ENVBEAM_S3_ACCESS_KEY: dopplerSecret('AKIA'),
+        ENVBEAM_S3_SECRET_KEY: dopplerSecret('shhh'),
+      }),
+    });
+    expect(await readExistingDopplerStorage(runner)).toEqual({
+      endpoint: '',
+      bucket: 'aws-bucket',
+      region: 'auto',
+      accessKey: 'AKIA',
+      secretKey: 'shhh',
+    });
+  });
+
+  it('returns null when required secrets (bucket/access/secret) are missing', async () => {
+    const runner = new FakeRunner().on(DOPPLER_SECRETS, {
+      stdout: JSON.stringify({ ENVBEAM_S3_BUCKET: dopplerSecret('only-bucket') }),
+    });
+    expect(await readExistingDopplerStorage(runner)).toBeNull();
+  });
+
+  it('returns null when the doppler command fails', async () => {
+    const runner = new FakeRunner().on(DOPPLER_SECRETS, { code: 1, stderr: 'not authenticated' });
+    expect(await readExistingDopplerStorage(runner)).toBeNull();
+  });
+
+  it('returns null on unparseable doppler output', async () => {
+    const runner = new FakeRunner().on(DOPPLER_SECRETS, { stdout: 'not json' });
+    expect(await readExistingDopplerStorage(runner)).toBeNull();
   });
 });
 
