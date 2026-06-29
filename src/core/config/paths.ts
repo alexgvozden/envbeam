@@ -25,3 +25,6 @@ export function credentialStorePath(): string {
 export function stateDir(): string {
   return path.join(globalDir(), 'state');
 }
+
+/** Registry file name in S3 bucket. */
+export const REGISTRY_FILE_NAME = 'envbeam-registry.json';

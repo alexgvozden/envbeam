@@ -3,8 +3,10 @@ import { createRequire } from 'node:module';
 import { Command } from 'commander';
 import pc from 'picocolors';
 import { initCommand } from './commands/init.js';
-import { resumeCommand } from './commands/resume.js';
-import { pauseCommand } from './commands/pause.js';
+import { pullCommand } from './commands/pull.js';
+import { pushCommand } from './commands/push.js';
+import { listCommand } from './commands/list.js';
+import { deleteCommand } from './commands/delete.js';
 import { statusCommand } from './commands/status.js';
 import { doctorCommand } from './commands/doctor.js';
 import {
@@ -54,13 +56,18 @@ async function main(): Promise<void> {
     .action(async (opts, cmd) => exit(await initCommand({ ...globalOpts(cmd), force: opts.force })));
 
   program
-    .command('resume')
-    .description('Get this machine ready to work where you left off')
-    .action(async (_opts, cmd) => exit(await resumeCommand(globalOpts(cmd))));
+    .command('pull [project]')
+    .alias('resume')
+    .description('Pull state and get ready to work (or bootstrap a project by name)')
+    .option('--dir <path>', 'directory to clone into (bootstrap mode)')
+    .action(async (project, opts, cmd) =>
+      exit(await pullCommand({ ...globalOpts(cmd), project, dir: opts.dir })),
+    );
 
   program
-    .command('pause')
-    .description('Safely hand off so you can switch to another machine')
+    .command('push')
+    .alias('pause')
+    .description('Push state so you can switch to another machine')
     .option('--force', 'proceed even if uncommitted work would be left behind')
     .option('--snapshot', 'force a database snapshot')
     .option('--no-snapshot', 'skip the database snapshot')
@@ -69,7 +76,7 @@ async function main(): Promise<void> {
     .option('-m, --message <msg>', 'commit/stash message')
     .action(async (opts, cmd) =>
       exit(
-        await pauseCommand({
+        await pushCommand({
           ...globalOpts(cmd),
           force: opts.force,
           snapshot: opts.snapshot === true ? true : undefined,
@@ -79,6 +86,20 @@ async function main(): Promise<void> {
           message: opts.message,
         }),
       ),
+    );
+
+  program
+    .command('list')
+    .description('List all registered projects')
+    .option('--json', 'output JSON')
+    .action(async (opts, cmd) => exit(await listCommand({ ...globalOpts(cmd), json: opts.json })));
+
+  program
+    .command('delete <project>')
+    .description('Delete a project from registry and remote storage (irreversible)')
+    .option('--force', 'skip confirmation prompt')
+    .action(async (project, opts, cmd) =>
+      exit(await deleteCommand(project, { ...globalOpts(cmd), force: opts.force })),
     );
 
   program

@@ -200,6 +200,20 @@ export const identityDefSchema = z
   })
   .strict();
 
+/** Global storage configuration for project registry and snapshots. */
+export const globalStorageConfigSchema = z
+  .object({
+    type: z.literal('s3').describe('Storage type (only S3 supported for registry).'),
+    bucket: z.string().describe('S3 bucket name.'),
+    region: z.string().optional().describe('S3 region.'),
+    endpoint: z.string().optional().describe('S3-compatible endpoint URL.'),
+    credentialSource: z
+      .enum(['env', 'doppler', 'manual'])
+      .default('doppler')
+      .describe('Where to load S3 credentials from.'),
+  })
+  .strict();
+
 export const globalConfigSchema = z
   .object({
     identities: z.record(identityDefSchema).default({}),
@@ -210,8 +224,11 @@ export const globalConfigSchema = z
       })
       .strict()
       .optional(),
+    /** Global storage configuration for project registry. */
+    storage: globalStorageConfigSchema.optional(),
   })
   .strict();
 
 export type IdentityDef = z.infer<typeof identityDefSchema>;
+export type GlobalStorageConfig = z.infer<typeof globalStorageConfigSchema>;
 export type GlobalConfig = z.infer<typeof globalConfigSchema>;

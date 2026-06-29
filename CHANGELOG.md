@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-29
+
+### Added
+- **Cross-machine project registry** — projects are now tracked in S3 for seamless sync across machines
+- **`envbeam setup`** — one-time global S3 storage configuration for cross-machine sync
+- **`envbeam list`** — list all registered projects across all machines
+- **`envbeam delete <project>`** — delete a project from registry and remote storage (requires confirmation)
+- **Bootstrap pull** — `envbeam pull <project-name>` clones, configures, and restores any registered project
+- **Auto-registration** — `envbeam init` automatically registers projects when storage is configured
+- **Unregistered project detection** — commands prompt to register local projects not yet in the registry
+
+### Changed
+- **Command renames** — `pause` renamed to `push`, `resume` renamed to `pull` (aliases preserved for backwards compatibility)
+- **Push workflow** — `envbeam push` now updates the project registry after successful completion
+
 ## [0.8.2] - 2026-06-29
 
 ### Fixed

@@ -7,6 +7,10 @@ import { pathExists } from '../core/util/fs.js';
 import { detectWorkspace } from '../core/detect/index.js';
 import { detectedValue, getField } from '../core/detect/types.js';
 import { parseConfig } from '../core/config/load.js';
+import { loadGlobalConfig } from '../core/config/globalConfig.js';
+import { RealCommandRunner } from '../core/util/exec.js';
+import { RegistryStore, type ProjectEntry } from '../core/registry/index.js';
+import { getMachineId } from '../core/util/machine.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
 
 /**
@@ -165,6 +169,38 @@ export async function initCommand(opts: InitOptions): Promise<number> {
     await fs.writeFile(configPath, yaml);
 
     logger.success(`Wrote ${WORKSPACE_CONFIG_NAME}`);
+
+    // Auto-register project if global storage is configured
+    const globalConfig = await loadGlobalConfig();
+    if (globalConfig.storage) {
+      try {
+        const runner = new RealCommandRunner();
+        const store = new RegistryStore(globalConfig.storage, runner);
+
+        // Check for name conflict
+        const existing = await store.getProject(workspace);
+        if (existing) {
+          logger.warn(`Project "${workspace}" already exists in registry.`);
+          logger.hint('Use a different workspace name or run `envbeam delete` first.');
+        } else {
+          const machineId = await getMachineId();
+          const entry: ProjectEntry = {
+            name: workspace,
+            gitRemote: gitUrl ?? '',
+            gitBranch: 'current',
+            configSnapshot: yaml,
+            lastPush: new Date().toISOString(),
+            machineId,
+          };
+          await store.registerProject(entry);
+          logger.success(`Registered "${workspace}" in project registry.`);
+        }
+      } catch (err) {
+        // Non-fatal - init succeeded, just warn about registry
+        logger.warn(`Could not register project: ${(err as Error).message}`);
+      }
+    }
+
     logger.hint('Run `envbeam doctor` to see what was detected and what still needs declaring.');
     return 0;
   });

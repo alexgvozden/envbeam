@@ -3,6 +3,9 @@ import { RealCommandRunner } from '../core/util/exec.js';
 import { EnvbeamError } from '../core/util/errors.js';
 import { ensureTools } from '../core/util/tools.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
+import { saveStorageConfig, RegistryStore } from '../core/registry/index.js';
+import type { GlobalStorageConfig } from '../core/config/schema.js';
+import { loadGlobalConfig } from '../core/config/globalConfig.js';
 
 export interface StorageSetupOptions extends GlobalCliOptions {
   endpoint?: string;
@@ -157,9 +160,38 @@ export async function storageSetupCommand(opts: StorageSetupOptions): Promise<nu
       logger.hint('Credentials were saved. You may need to check bucket permissions or endpoint URL.');
     }
 
+    // 7. Save storage config to global config
+    logger.info('Saving storage configuration…');
+    const storageConfig: GlobalStorageConfig = {
+      type: 's3',
+      bucket,
+      region,
+      endpoint,
+      credentialSource: 'doppler',
+    };
+    await saveStorageConfig(storageConfig);
+
+    // 8. Initialize registry in S3
+    logger.info('Initializing project registry…');
+    const registryStore = new RegistryStore(storageConfig, runner);
+
+    // Temporarily set env vars for registry initialization
+    process.env.ENVBEAM_S3_ACCESS_KEY = accessKey;
+    process.env.ENVBEAM_S3_SECRET_KEY = secretKey;
+    process.env.ENVBEAM_S3_ENDPOINT = endpoint;
+    process.env.ENVBEAM_S3_BUCKET = bucket;
+    process.env.ENVBEAM_S3_REGION = region;
+
+    const created = await registryStore.initializeIfNeeded();
+    if (created) {
+      logger.sub('Created empty project registry.');
+    } else {
+      logger.sub(pc.dim('Project registry already exists.'));
+    }
+
     logger.raw('');
-    logger.success('Storage configuration saved to Doppler.');
-    logger.hint(`To use in workspaces, run: doppler run -p ${DOPPLER_PROJECT} -c ${DOPPLER_CONFIG} -- envbeam resume`);
+    logger.success('Storage and registry configured successfully.');
+    logger.hint(`To use in workspaces, run: doppler run -p ${DOPPLER_PROJECT} -c ${DOPPLER_CONFIG} -- envbeam push`);
     logger.hint('Or set ENVBEAM_S3_* variables in your shell / secrets provider.');
 
     return 0;
@@ -208,6 +240,10 @@ export async function storageStatusCommand(opts: GlobalCliOptions): Promise<numb
     logger.raw(pc.bold('Storage Configuration'));
     logger.raw('');
 
+    // Check global config for storage settings
+    const globalConfig = await loadGlobalConfig();
+    const hasGlobalStorage = !!globalConfig.storage;
+
     if (hasEnvConfig) {
       // Environment is active (injected or manually set)
       logger.raw(pc.green('✓') + ' S3 storage active:');
@@ -216,16 +252,47 @@ export async function storageStatusCommand(opts: GlobalCliOptions): Promise<numb
           logger.raw(`  ${key.padEnd(24)} ${pc.dim(value)}`);
         }
       }
-    } else if (hasDopplerGlobal) {
-      // Global storage configured in Doppler
-      const bucketInfo = dopplerBucket ? ` (${dopplerBucket})` : '';
-      const endpointInfo = dopplerEndpoint ? ` via ${dopplerEndpoint}` : '';
+    } else if (hasDopplerGlobal || hasGlobalStorage) {
+      // Global storage configured
+      const bucket = dopplerBucket || globalConfig.storage?.bucket || '';
+      const endpoint = dopplerEndpoint || globalConfig.storage?.endpoint || '';
+      const bucketInfo = bucket ? ` (${bucket})` : '';
+      const endpointInfo = endpoint ? ` via ${endpoint}` : '';
       logger.raw(pc.green('✓') + ` Global storage configured${bucketInfo}${endpointInfo}`);
       logger.raw(pc.dim('  Credentials auto-loaded from Doppler when needed.'));
     } else {
       // No storage configured
       logger.raw(pc.yellow('!') + ' No storage configured.');
       logger.hint('Run `envbeam storage setup` to configure global S3 storage.');
+    }
+
+    // Show registry status if storage is configured
+    if (hasEnvConfig || hasDopplerGlobal || hasGlobalStorage) {
+      logger.raw('');
+      logger.raw(pc.bold('Project Registry'));
+
+      try {
+        const { RegistryStore } = await import('../core/registry/index.js');
+        const storage = globalConfig.storage || {
+          type: 's3' as const,
+          bucket: dopplerBucket || process.env.ENVBEAM_S3_BUCKET || '',
+          region: process.env.ENVBEAM_S3_REGION,
+          endpoint: dopplerEndpoint || process.env.ENVBEAM_S3_ENDPOINT,
+          credentialSource: 'doppler' as const,
+        };
+        const registryStore = new RegistryStore(storage, runner);
+        const projects = await registryStore.listProjects();
+        logger.raw(pc.green('✓') + ` ${projects.length} project(s) registered`);
+        if (projects.length > 0 && projects.length <= 5) {
+          for (const p of projects) {
+            logger.raw(pc.dim(`  • ${p.name}`));
+          }
+        } else if (projects.length > 5) {
+          logger.raw(pc.dim(`  Run 'envbeam list' to see all projects.`));
+        }
+      } catch (err) {
+        logger.raw(pc.yellow('!') + ` Could not load registry: ${(err as Error).message}`);
+      }
     }
 
     return 0;
