@@ -27,9 +27,24 @@ async function generateCommitMessage(
     allowFailure: true,
   });
 
-  // Keep prompt short and simple for reliability
+  // Get actual diff for context
+  const diff = await ctx.runner.run('git', ['diff', '--no-color'], {
+    cwd: ctx.workspaceRoot,
+    allowFailure: true,
+  });
+
   const filesChanged = status.stdout.trim().split('\n').slice(0, 10).join('\n');
-  const prompt = `Write a short git commit message (under 72 chars) for:\n${filesChanged}`;
+  const diffContent = diff.stdout.slice(0, 3000); // Limit to avoid token issues
+
+  const prompt = `You are a git commit message generator. Output ONLY the commit message, nothing else. No explanations, no questions, no markdown.
+
+Files:
+${filesChanged}
+
+Diff:
+${diffContent}
+
+Commit message:`;
 
   // Use shell on Windows to handle .cmd/.bat files
   const result = await ctx.runner.run(claudePath, ['-p', prompt], {
