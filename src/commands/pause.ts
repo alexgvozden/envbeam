@@ -63,6 +63,10 @@ async function generateCommitMessage(
       }
       // If not confirmed, fall through to manual input with generated as default
       return prompter.input('Commit message', generated);
+    } else if (generated.length > 100) {
+      logger.sub(pc.dim(`Claude response too long (${generated.length} chars), using manual input`));
+    } else {
+      logger.sub(pc.dim(`Claude returned empty response: "${result.stdout.slice(0, 50)}"`));
     }
   }
 
