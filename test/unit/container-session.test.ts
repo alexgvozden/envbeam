@@ -62,6 +62,18 @@ describe('ensureDockerRunning (self-heal)', () => {
     runner.on('cmd', {});
     expect(await ensureDockerRunning(ctxWith(runner), 100)).toBe(false);
   });
+
+  it('treats exit-0-but-empty `docker info` as daemon DOWN (docker 25.x quirk) and tries to start it', async () => {
+    const runner = new FakeRunner({ available: ['docker'] });
+    // docker 25.x: exits 0 with empty stdout (error on stderr) when the daemon is down
+    runner.on('docker info', { code: 0, stdout: '', stderr: 'Cannot connect to the Docker daemon' });
+    runner.on('open', {});
+    runner.on('sh', {});
+    runner.on('cmd', {});
+    expect(await ensureDockerRunning(ctxWith(runner), 100)).toBe(false);
+    // the old code returned true immediately here; now it recognizes down and attempts a start
+    expect(runner.calls.some((c) => ['open', 'sh', 'cmd'].includes(c.command))).toBe(true);
+  });
 });
 
 describe('compose container provider', () => {
@@ -70,6 +82,7 @@ describe('compose container provider', () => {
     cleanups.push(cleanup);
     await writeFiles(dir, { 'docker-compose.yml': 'services:\n  db:\n    image: postgres:16\n' });
     const runner = new FakeRunner({ available: ['docker'] });
+    runner.on('docker info', { stdout: '25.0.3' }); // daemon up
     runner.on('docker compose', (c, args) =>
       args.includes('ps') ? { stdout: JSON.stringify([{ Name: 'db', State: 'running' }]) } : {},
     );
@@ -108,6 +121,7 @@ describe('devcontainer provider', () => {
     const { dir, cleanup } = await tmpDir();
     cleanups.push(cleanup);
     const runner = new FakeRunner({ available: ['devcontainer', 'docker'] });
+    runner.on('docker info', { stdout: '25.0.3' }); // daemon up
     runner.on('devcontainer up', { stdout: '{"outcome":"success"}' });
     runner.on('docker ps', { stdout: 'abc123def456\n' });
     const provider = new DevcontainerProvider();

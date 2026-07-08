@@ -7,12 +7,18 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Whether the Docker daemon is reachable right now. */
-async function daemonUp(ctx: ProviderContext): Promise<boolean> {
+/**
+ * Whether the Docker daemon is reachable right now. We require a real server
+ * version in stdout — not just exit 0 — because older Docker CLIs (e.g. 25.x)
+ * exit 0 from `docker info --format` even when the daemon is down (the error
+ * goes to stderr and the template renders empty).
+ */
+export async function isDockerDaemonUp(ctx: ProviderContext): Promise<boolean> {
   const res = await ctx.runner.run('docker', ['info', '--format', '{{.ServerVersion}}'], {
     allowFailure: true,
   });
-  return res.code === 0;
+  const version = res.stdout.trim();
+  return res.code === 0 && version.length > 0 && version !== '<no value>';
 }
 
 /** Best-effort command to launch the Docker daemon for this platform. */
@@ -51,7 +57,7 @@ export async function ensureDockerRunning(ctx: ProviderContext, timeoutMs = 120_
   }
 
   // 2) Daemon up?
-  if (await daemonUp(ctx)) return true;
+  if (await isDockerDaemonUp(ctx)) return true;
   if (ctx.dryRun) return true;
 
   const start = startDockerCommand();
@@ -65,7 +71,7 @@ export async function ensureDockerRunning(ctx: ProviderContext, timeoutMs = 120_
   while (Date.now() - startedAt < timeoutMs) {
     await sleep(2000);
     waited += 2;
-    if (await daemonUp(ctx)) {
+    if (await isDockerDaemonUp(ctx)) {
       ctx.logger.sub(pc.dim(`Docker is ready (after ${waited}s).`));
       return true;
     }

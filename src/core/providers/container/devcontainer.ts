@@ -5,7 +5,7 @@ import type {
   ToolRequirement,
 } from '../types.js';
 import type { ProviderFactory } from '../registry.js';
-import { ensureDockerRunning } from '../../util/docker.js';
+import { ensureDockerRunning, isDockerDaemonUp } from '../../util/docker.js';
 
 const FOLDER_LABEL = 'devcontainer.local_folder';
 
@@ -29,12 +29,8 @@ export class DevcontainerProvider implements ContainerProvider {
         command: 'docker',
         versionArgs: ['--version'],
         installHint: 'Install Docker: https://docs.docker.com/get-docker/',
-        authCheck: async (ctx) => {
-          const res = await ctx.runner.run('docker', ['info', '--format', '{{.ServerVersion}}'], {
-            allowFailure: true,
-          });
-          return res.code === 0 ? { ok: true } : { ok: false, detail: 'docker daemon not running' };
-        },
+        authCheck: async (ctx) =>
+          (await isDockerDaemonUp(ctx)) ? { ok: true } : { ok: false, detail: 'docker daemon not running' },
       },
     ];
   }

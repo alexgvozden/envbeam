@@ -7,7 +7,7 @@ import type {
 } from '../types.js';
 import type { ProviderFactory } from '../registry.js';
 import { findComposeFile } from '../../detect/container.js';
-import { ensureDockerRunning } from '../../util/docker.js';
+import { ensureDockerRunning, isDockerDaemonUp } from '../../util/docker.js';
 import { EnvbeamError } from '../../util/errors.js';
 
 export async function resolveComposeFile(ctx: ProviderContext): Promise<string> {
@@ -37,12 +37,8 @@ export class ComposeContainerProvider implements ContainerProvider {
         command: 'docker',
         versionArgs: ['--version'],
         installHint: 'Install Docker: https://docs.docker.com/get-docker/',
-        authCheck: async (ctx) => {
-          const res = await ctx.runner.run('docker', ['info', '--format', '{{.ServerVersion}}'], {
-            allowFailure: true,
-          });
-          return res.code === 0 ? { ok: true } : { ok: false, detail: 'docker daemon not running' };
-        },
+        authCheck: async (ctx) =>
+          (await isDockerDaemonUp(ctx)) ? { ok: true } : { ok: false, detail: 'docker daemon not running' },
       },
     ];
   }

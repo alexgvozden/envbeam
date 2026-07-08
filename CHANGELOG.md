@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-07-08
+
+### Fixed
+- **Docker daemon detection was a false positive on Docker CLI 25.x** — `docker info --format '{{.ServerVersion}}'` exits **0** with empty output (error on stderr) when the daemon is down on older CLIs, so envbeam thought Docker was up, skipped starting it, and then failed at `compose up`. The check now requires a real server version, not just exit 0 — so `ensureDockerRunning` actually starts Docker, and preflight reports the daemon honestly. Shared `isDockerDaemonUp` is reused by the compose/devcontainer auth-checks.
+
 ## [0.11.1] - 2026-07-08
 
 ### Fixed
