@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-07-08
+
+### Fixed
+- **Session encryption auto-installs `age`** — pushing a session on a machine without `age` crashed the whole push with `spawn age ENOENT`. The session provider now installs `age` for you before encrypting/decrypting (it was already in the tool registry — just never requested), and the Session step in both `push` and `pull` is best-effort: a session-sync failure warns and continues instead of aborting the checkpoint after git has already pushed.
+
 ## [0.13.1] - 2026-07-08
 
 ### Fixed

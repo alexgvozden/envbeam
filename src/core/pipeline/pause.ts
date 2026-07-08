@@ -86,12 +86,18 @@ export async function runPause(ctx: RunContext, opts: PauseOptions): Promise<Pau
     report.database = await pauseDatabase(ctx, active, opts);
   }
 
-  // 3. Session
+  // 3. Session — best-effort: a session-sync failure must never abort the
+  // push (git is already pushed by now; the checkpoint should still complete).
   if (active.session) {
     log.step('Session');
-    const res = await active.session.push(ctx.providerCtx('session'));
-    report.session = { action: res.action, detail: res.detail };
-    log.sub(res.detail ?? res.action);
+    try {
+      const res = await active.session.push(ctx.providerCtx('session'));
+      report.session = { action: res.action, detail: res.detail };
+      log.sub(res.detail ?? res.action);
+    } catch (e) {
+      report.session = { action: 'noop', detail: `session push failed: ${(e as Error).message}` };
+      log.warn(`session push failed (continuing): ${(e as Error).message}`);
+    }
   }
 
   // 4. Secrets — push if two-way sync is enabled

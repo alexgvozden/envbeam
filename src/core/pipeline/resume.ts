@@ -129,12 +129,17 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
   // package manager if missing, and sync project deps (best-effort, non-fatal).
   report.deps = (await installRuntimeDeps(ctx)) ?? undefined;
 
-  // 5. Session
+  // 5. Session — best-effort: never block getting the machine ready to work.
   if (active.session) {
     log.step('Session');
-    const res = await active.session.pull(ctx.providerCtx('session'));
-    report.session = { action: res.action, detail: res.detail };
-    log.sub(res.detail ?? res.action);
+    try {
+      const res = await active.session.pull(ctx.providerCtx('session'));
+      report.session = { action: res.action, detail: res.detail };
+      log.sub(res.detail ?? res.action);
+    } catch (e) {
+      report.session = { action: 'noop', detail: `session pull failed: ${(e as Error).message}` };
+      log.warn(`session pull failed (continuing): ${(e as Error).message}`);
+    }
   }
 
   // 5. Container

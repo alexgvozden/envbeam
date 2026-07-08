@@ -19,6 +19,7 @@ import {
   injectEncryptionEnv,
 } from '../../storage/global.js';
 import { ensureDir, pathExists } from '../../util/fs.js';
+import { ensureTools } from '../../util/tools.js';
 import { machineName } from '../database/base.js';
 
 /**
@@ -238,7 +239,12 @@ export class ClaudeNativeProvider implements SessionProvider {
     const keyErr = await this.ensureEncryptionKeys(ctx, 'public');
     if (keyErr) return { action: 'noop', detail: keyErr };
 
-    // Always encrypt session archives with age
+    // Sessions are always age-encrypted — install age for the user if missing.
+    const age = await ensureTools(['age'], ctx.runner, ctx.logger, ctx.prompter);
+    if (!age.allInstalled) {
+      return { action: 'noop', detail: 'age (encryption tool) is not installed — session not pushed' };
+    }
+
     const encryptedConfig: SyncConfig = { ...syncConfig, encrypt: 'age' };
     const uploadPath = archivePath + '.age';
     const uploadName = archiveName + '.age';
@@ -291,6 +297,12 @@ export class ClaudeNativeProvider implements SessionProvider {
 
     const keyErr = await this.ensureEncryptionKeys(ctx, 'private');
     if (keyErr) return { action: 'noop', detail: keyErr };
+
+    // Decryption needs age too — install it for the user if missing.
+    const age = await ensureTools(['age'], ctx.runner, ctx.logger, ctx.prompter);
+    if (!age.allInstalled) {
+      return { action: 'noop', detail: 'age (encryption tool) is not installed — session not restored' };
+    }
 
     const tempDir = path.join(os.tmpdir(), 'envbeam-session');
     await ensureDir(tempDir);
