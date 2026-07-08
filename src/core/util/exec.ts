@@ -63,8 +63,14 @@ function traceStart(command: string, args: string[]): void {
 }
 function traceEnd(command: string, code: number, stderr: string): void {
   if (!COMMAND_TRACE) return;
-  const firstErr = code !== 0 ? stderr.trim().split(/\r?\n/)[0] : '';
-  process.stderr.write(pc.dim(`    → exit ${code}${firstErr ? `: ${firstErr}` : ''}`) + '\n');
+  let summary = '';
+  if (code !== 0) {
+    // Prefer the line that names the error over progress noise (e.g. compose's
+    // "db Pulling" lines precede the actual "Error response from daemon: …").
+    const lines = stderr.trim().split(/\r?\n/).filter(Boolean);
+    summary = lines.find((l) => /error|failed|denied|cannot|fatal|refused/i.test(l)) ?? lines[0] ?? '';
+  }
+  process.stderr.write(pc.dim(`    → exit ${code}${summary ? `: ${summary}` : ''}`) + '\n');
 }
 
 export class RealCommandRunner implements CommandRunner {

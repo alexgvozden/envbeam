@@ -32,6 +32,26 @@ function isDaemonError(stderr: string): boolean {
   return /cannot connect to the docker daemon|is the docker daemon running|docker daemon/i.test(stderr);
 }
 
+/** Extract the host port from a "Bind for 0.0.0.0:5432 failed: port is already allocated" error. */
+export function parsePortConflict(stderr: string): string | null {
+  const m = stderr.match(/bind for [\d.:[\]]*:(\d+) failed: port is already allocated/i);
+  return m?.[1] ?? null;
+}
+
+/** Tailor the failure hint to what actually went wrong (not a generic guess). */
+function composeFailureHint(err: string): string {
+  if (parsePortConflict(err)) {
+    return `Another service holds port ${parsePortConflict(err)} — stop it (see above), or change the published port (e.g. POSTGRES_PORT) and re-run.`;
+  }
+  if (isDaemonError(err)) {
+    return 'Ensure Docker is running (Docker Desktop / colima / OrbStack), then re-run.';
+  }
+  if (/pull access denied|manifest unknown|not found/i.test(err)) {
+    return 'The image could not be pulled — check the image name/registry access in the compose file.';
+  }
+  return 'Run `envbeam --verbose pull` to see each command, or `docker compose up` directly for full output.';
+}
+
 export class ComposeContainerProvider implements ContainerProvider {
   readonly name = 'compose';
   readonly kind = 'container' as const;
@@ -73,13 +93,57 @@ export class ComposeContainerProvider implements ContainerProvider {
         allowFailure: true,
       });
     }
+    // Port conflict self-heal: find what holds the port, offer to stop it, retry.
+    const conflictPort = res.code !== 0 ? parsePortConflict(res.stderr) : null;
+    if (conflictPort && (await this.resolvePortConflict(ctx, conflictPort))) {
+      res = await ctx.runner.run('docker', composeArgs(file, rest), {
+        cwd: ctx.workspaceRoot,
+        allowFailure: true,
+      });
+    }
     if (res.code !== 0) {
-      throw new EnvbeamError(`docker compose up failed: ${res.stderr.trim() || res.stdout.trim()}`, {
+      const err = res.stderr.trim() || res.stdout.trim();
+      throw new EnvbeamError(`docker compose up failed: ${err}`, {
         exitCode: 2,
-        hint: 'Ensure Docker is running (Docker Desktop / colima / OrbStack), then re-run.',
+        hint: composeFailureHint(err),
       });
     }
     return this.status(ctx);
+  }
+
+  /**
+   * A published port is taken. Name the culprit (container, or host process via
+   * lsof) and — for containers — offer to stop it so the stack can come up.
+   * Returns true when the port was freed and a retry makes sense.
+   */
+  private async resolvePortConflict(ctx: ProviderContext, port: string): Promise<boolean> {
+    // Another container publishing this port?
+    const ps = await ctx.runner.run(
+      'docker',
+      ['ps', '--filter', `publish=${port}`, '--format', '{{.Names}}\t{{.Label "com.docker.compose.project"}}'],
+      { allowFailure: true },
+    );
+    const [name, project] = (ps.stdout.trim().split(/\r?\n/)[0] ?? '').split('\t');
+    if (ps.code === 0 && name) {
+      const who = project ? `container '${name}' (compose project '${project}')` : `container '${name}'`;
+      ctx.logger.sub(`port ${port} is already used by ${who}`);
+      const stop = await ctx.prompter.confirm(`Stop ${who} to free port ${port} and retry?`, true);
+      if (!stop) return false;
+      const stopped = await ctx.runner.run('docker', ['stop', name], { allowFailure: true });
+      if (stopped.code === 0) {
+        ctx.logger.sub(`stopped '${name}' — retrying`);
+        return true;
+      }
+      ctx.logger.warn(`could not stop '${name}': ${stopped.stderr.trim()}`);
+      return false;
+    }
+    // A host process (e.g. brew postgres)? Name it so the user knows what to stop.
+    if (process.platform !== 'win32') {
+      const lsof = await ctx.runner.run('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN'], { allowFailure: true });
+      const line = lsof.stdout.trim().split(/\r?\n/)[1]; // skip header
+      if (line) ctx.logger.warn(`port ${port} is held by a host process: ${line.split(/\s+/).slice(0, 2).join(' (pid ')})`);
+    }
+    return false;
   }
 
   async down(ctx: ProviderContext): Promise<void> {

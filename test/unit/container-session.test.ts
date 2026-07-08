@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { ComposeContainerProvider, parseComposePs } from '../../src/core/providers/container/compose.js';
+import { ComposeContainerProvider, parseComposePs, parsePortConflict } from '../../src/core/providers/container/compose.js';
+import { AutoPrompter } from '../../src/core/util/prompt.js';
 import { DevcontainerProvider } from '../../src/core/providers/container/devcontainer.js';
 import { ClaudeSyncProvider } from '../../src/core/providers/session/claudeSync.js';
 import { RemoteControlProvider } from '../../src/core/providers/session/remoteControl.js';
@@ -109,6 +110,65 @@ describe('compose container provider', () => {
     const ctx = makeTestContext({ config: { version: 1, workspace: 'w', container: { mode: 'compose' } }, runner, workspaceRoot: dir }).providerCtx('container');
     await provider.down(ctx);
     expect(runner.calls.some((c) => c.args.includes('stop'))).toBe(true);
+  });
+
+  it('port conflict: names the culprit container, stops it on confirm, and retries', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    await writeFiles(dir, { 'docker-compose.yml': 'services:\n  db:\n    image: postgres:16\n' });
+    const runner = new FakeRunner({ available: ['docker'] });
+    runner.on('docker info', { stdout: '25.0.3' });
+    let conflicted = true;
+    runner.on('docker compose', (_c, args) => {
+      if (args.includes('ps')) return { stdout: JSON.stringify([{ Name: 'db', State: 'running' }]) };
+      if (args.includes('up') && conflicted) {
+        return { code: 1, stderr: 'Error response from daemon: … Bind for 0.0.0.0:5432 failed: port is already allocated' };
+      }
+      return {};
+    });
+    runner.on('docker ps', { stdout: 'other-postgres\tother-project\n' });
+    runner.on('docker stop', () => {
+      conflicted = false; // stopping frees the port
+      return {};
+    });
+    const provider = new ComposeContainerProvider();
+    const ctx = makeTestContext({
+      config: { version: 1, workspace: 'w', container: { mode: 'compose' } },
+      runner,
+      workspaceRoot: dir,
+      prompter: new AutoPrompter({ defaults: true }), // confirm the stop
+    }).providerCtx('container');
+    const status = await provider.up(ctx);
+    expect(status.running).toBe(true);
+    expect(runner.calls.some((c) => c.command === 'docker' && c.args[0] === 'stop' && c.args[1] === 'other-postgres')).toBe(true);
+  });
+
+  it('port conflict: declining the stop surfaces a targeted error', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    await writeFiles(dir, { 'docker-compose.yml': 'services:\n  db:\n    image: postgres:16\n' });
+    const runner = new FakeRunner({ available: ['docker'] });
+    runner.on('docker info', { stdout: '25.0.3' });
+    runner.on('docker compose', (_c, args) =>
+      args.includes('up')
+        ? { code: 1, stderr: 'Bind for 0.0.0.0:5432 failed: port is already allocated' }
+        : { stdout: '[]' },
+    );
+    runner.on('docker ps', { stdout: 'other-postgres\t\n' });
+    const provider = new ComposeContainerProvider();
+    const ctx = makeTestContext({
+      config: { version: 1, workspace: 'w', container: { mode: 'compose' } },
+      runner,
+      workspaceRoot: dir,
+      prompter: new AutoPrompter({ answers: [{ match: 'Stop', value: false }] }),
+    }).providerCtx('container');
+    await expect(provider.up(ctx)).rejects.toThrow(/port is already allocated/);
+    expect(runner.calls.some((c) => c.command === 'docker' && c.args[0] === 'stop')).toBe(false);
+  });
+
+  it('parsePortConflict extracts the host port', () => {
+    expect(parsePortConflict('Bind for 0.0.0.0:5432 failed: port is already allocated')).toBe('5432');
+    expect(parsePortConflict('some other error')).toBeNull();
   });
 
   it('parses both JSON-array and NDJSON ps output', () => {

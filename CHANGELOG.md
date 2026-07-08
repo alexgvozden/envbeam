@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.7] - 2026-07-08
+
+### Added
+- **Port-conflict self-heal on `compose up`** — when a published port is already allocated (e.g. another Postgres on 5432), envbeam now finds the culprit: if it's another container it names it (with its compose project) and offers to **stop it and retry**; if it's a host process it identifies it via `lsof` (e.g. a brew postgres) so you know exactly what to stop. Failure hints are now tailored to the actual error (port conflict / daemon down / image pull) instead of a generic "ensure Docker is running".
+- Verbose trace failure summaries now surface the real error line (e.g. `Error response from daemon: …`) instead of progress noise like `db Pulling`.
+
 ## [0.11.6] - 2026-07-08
 
 ### Fixed
