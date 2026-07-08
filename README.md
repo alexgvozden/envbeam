@@ -1,6 +1,6 @@
 # envbeam
 
-> **`env.beam`** — beam your whole dev environment to any machine. Pause here, resume there.
+> **`env.beam`** — beam your whole dev environment to another machine. Pause here, resume there.
 
 <p>
   <img alt="version" src="https://img.shields.io/badge/version-0.16.0-blue">
@@ -9,59 +9,72 @@
   <img alt="local-only" src="https://img.shields.io/badge/backend-none%20(local--only)-purple">
 </p>
 
-Switching laptops, spinning up a cloud VM, or handing a task to a beefier box shouldn't mean re-cloning, re-fetching secrets, rebuilding containers, and losing your database state and AI session. `envbeam` moves **all of it** in two commands:
+Switching laptops or spinning up a cloud VM shouldn't mean re-cloning, re-fetching secrets, rebuilding containers, and losing your database state and AI session. `envbeam` moves **all of it** with two commands:
 
 ```bash
-envbeam pause     # safely hand off this machine
-envbeam resume    # pick up on the other machine exactly where you left off
+envbeam push     # hand off this machine
+envbeam pull     # pick up where you left off on the other one
 ```
 
-It carries **code · secrets · container · database state · Claude Code session** — each under **the right account** for that concern (your work GitHub, your personal Doppler vault, and so on).
+> `push` and `pull` are the command names. `pause` and `resume` are aliases for the same two commands — use whichever reads better to you.
 
-There is **no envbeam backend**. Everything runs locally and flows only through infrastructure *you already own*: your git remote, your secrets manager, your storage bucket.
+**Contents** · [What it moves](#what-it-moves) · [How it works](#how-it-works) · [Install](#install) · [Quick start](#quick-start) · [The two commands](#the-two-commands) · [All commands](#all-commands) · [Supported platforms](#supported-platforms) · [Configuration](#configuration) · [Guarantees](#guarantees) · [Development](#development)
+
+---
+
+## What it moves
+
+| | Carried by | Where it goes |
+|---|---|---|
+| 🧬 **Code** | `git` | your git remote |
+| 🔐 **Secrets** | Doppler / 1Password | pulled into a gitignored `.env` |
+| 📦 **Container** | Dev Container / Compose | rebuilt on the other machine |
+| 🗄️ **Database state** | `pg_dump` / `mysqldump` | encrypted snapshot on your sync target |
+| 🤖 **Claude Code session** | `claude-sync` | encrypted on your sync target |
+
+Each concern runs under **the right account** for it (work GitHub, personal Doppler vault, …). There is **no envbeam backend** — everything flows only through infrastructure *you already own*.
 
 ---
 
 ## How it works
 
-`envbeam` doesn't reinvent anything — it orchestrates the tools you already use, in the right order, behind two verbs.
+`envbeam` doesn't reinvent anything. It orchestrates the tools you already use, in the right order, behind the two commands.
 
 ```
-      ┌──────────────────────────────┐                    ┌──────────────────────────────┐
-      │  💻  Machine A  (your laptop) │                    │  ☁️  Machine B  (cloud VM)    │
-      │                              │                    │                              │
-      │      envbeam pause  ─────────┼───┐            ┌───┼─────────  envbeam resume     │
-      └──────────────────────────────┘   │            │   └──────────────────────────────┘
-                                         │            │
-                                    push │            │ pull
-                                         ▼            ▲
-                   ┌─────────────────────────────────────────────────────┐
-                   │              infrastructure YOU own                  │
-                   ├─────────────────────────────────────────────────────┤
-                   │  code   ───────────►  git remote      GitHub/GitLab  │
-                   │  secrets ──────────►  Doppler · 1Password            │
-                   │  database snapshot ►  S3 · Syncthing · local folder  │
-                   │  Claude session ───►  S3  (age/gpg encrypted)        │
-                   └─────────────────────────────────────────────────────┘
-                        no envbeam server ever sees your code or data
+   ┌───────────────────────────┐                        ┌───────────────────────────┐
+   │  💻  Machine A  (laptop)   │                        │  ☁️  Machine B  (cloud VM) │
+   │                           │                        │                           │
+   │     envbeam push  ────────┼───┐                ┌───┼──────── envbeam pull       │
+   └───────────────────────────┘   │                │   └───────────────────────────┘
+                                   │  push      pull │
+                                   ▼                 ▲
+                 ┌───────────────────────────────────────────────────┐
+                 │              infrastructure YOU own                │
+                 ├───────────────────────────────────────────────────┤
+                 │  code   ───────────►  git remote     GitHub/GitLab │
+                 │  secrets ──────────►  Doppler · 1Password          │
+                 │  database snapshot ►  S3 · Syncthing · local dir   │
+                 │  Claude session ───►  S3  (age/gpg encrypted)      │
+                 └───────────────────────────────────────────────────┘
+                     no envbeam server ever sees your code or data
 ```
 
-- **Detection-first.** Point it at a repo and it figures out your git remote, container mode (Compose / Dev Container), database engine, migration command, and secret keys. You only write config to *override* a wrong guess.
-- **Ordered & fail-fast.** Each verb runs a strict pipeline (preflight → git → secrets → deps → session → container → database → report) that stops on the first real problem.
-- **Non-destructive.** No command silently drops uncommitted work or local DB state. Destructive actions need confirmation or `--force`.
-- **Idempotent.** `resume` and `status` converge without side effects; safe to re-run.
+- **Detection-first** — point it at a repo and it infers the git remote, container mode, database engine, migrate command, and secret keys. You write config only to *override* a wrong guess.
+- **Ordered & fail-fast** — each command is a strict pipeline that stops on the first real problem.
+- **Non-destructive** — nothing silently drops uncommitted work or local DB state; destructive actions need confirmation or `--force`.
+- **Idempotent** — `pull` and `status` converge without side effects; safe to re-run.
 
 ---
 
 ## Install
 
-`envbeam` isn't on the public npm registry yet — install it straight from the git repo:
+Not on the public npm registry yet — install straight from git:
 
 ```bash
 npm install -g "git+ssh://git@github.com/alexgvozden/envbeam.git#main"
 ```
 
-Requires **Node ≥ 18**. `envbeam` shells out to the CLIs of whatever providers you use (`git`, `docker`, `doppler`/`op`, `pg_dump`/`mysqldump`, `claude-sync`, …). Missing a tool? `envbeam` **installs it for you** on demand — or run `envbeam doctor` to see the full picture up front.
+Requires **Node ≥ 18**. Missing a provider CLI (`docker`, `doppler`, `pg_dump`, …)? `envbeam` **installs it for you** on demand — or run `envbeam doctor` to see the full picture first.
 
 ---
 
@@ -69,23 +82,26 @@ Requires **Node ≥ 18**. `envbeam` shells out to the CLIs of whatever providers
 
 ```bash
 cd my-project
-envbeam init                                     # scaffold .envbeam.yaml (auto-detects what it can)
-envbeam identity add github:work --type git --ssh-host github-work
-envbeam identity add doppler:personal --type doppler
-envbeam doctor                                   # verify tools + auth + detection
-envbeam resume                                   # branch synced, secrets loaded, container up, session pulled
-# … work …
-envbeam pause                                    # commit/push, optional DB snapshot, push session
+envbeam init      # scaffold .envbeam.yaml — auto-detects git, container, DB, secrets
+envbeam doctor    # verify tools + auth, and show what was detected
+
+envbeam push      # hand off: commit & push, snapshot DB, push session
+# … then on the other machine …
+envbeam pull      # pick up: branch, secrets, container, DB, session — all restored
 ```
+
+That's the whole happy path. `init` detects your git account automatically, so most single-account setups need no further configuration. Juggling work + personal accounts? See [Identities](#identities-multi-account).
 
 ---
 
-## The two verbs
+## The two commands
 
-### `envbeam resume` — get this machine ready to work
+### `envbeam pull` — get this machine ready to work
+
+*(alias: `envbeam resume`)*
 
 ```console
-$ envbeam resume
+$ envbeam pull
 ▸ 1. Preflight
     ✓ git 2.39.5
     ✓ doppler 3.68.0
@@ -97,41 +113,30 @@ $ envbeam resume
     pulled 24 secret(s) from doppler → wrote .env
 ▸ 4. Session
     pulled 2 session(s)
-→ Your Claude sessions are restored — run `claude --resume` in this project to pick one up.
 ▸ 5. Container
     container up
 ▸ 6. Database
     migrations applied (2 new)
     restored snapshot from 2026-07-08T14-32-10Z
 ▸ 7. Report
-    identity:  github:work
     branch:    main (fast-forwarded)
     secrets:   24 written to .env
     container: up
     database:  restored snapshot 2026-07-08T14-32-10Z, migrations applied
     session:   synced
 ✓ Ready to work.
-→ Start coding — env, container, and session are in place.
 ```
 
-What it does, in order:
+Fetches & fast-forwards git (never clobbering uncommitted work), pulls secrets into a gitignored `.env`, restores your Claude session, brings the container up, applies migrations, and offers to restore a newer DB snapshot.
 
-1. **Preflight** — required tools present & authenticated; auto-installs missing DB clients.
-2. **Git** — fetch, then fast-forward a clean tree. **Never clobbers uncommitted work.**
-3. **Secrets** — pull from your provider into a **gitignored** `.env`. Never written anywhere git-tracked.
-4. **Session** — pull the Claude Code session for this workspace.
-5. **Container** — bring the Dev Container / Compose stack up.
-6. **Database** — apply pending migrations (always); in snapshot mode, offer to restore a newer snapshot.
-7. **Report** — a one-glance summary of everything that changed.
+### `envbeam push` — safely hand off this machine
 
-### `envbeam pause` — safely hand off this machine
+*(alias: `envbeam pause`)*
 
 ```console
-$ envbeam pause --commit -m "wip: checkout flow"
+$ envbeam push --commit -m "wip: checkout flow"
 ▸ 1. Git
     2 uncommitted file(s)
-      src/checkout.ts
-      src/cart.ts
     committed working changes
     pushed main → origin (4 commits)
 ▸ 2. Database
@@ -141,68 +146,54 @@ $ envbeam pause --commit -m "wip: checkout flow"
 ▸ 3. Session
     pushed 2 session(s)
 ▸ 4. Secrets
-    not pushed (sync: pull-only — provider is source of truth)
+    not pushed (provider is source of truth)
 ▸ 5. Report
     git:       main — committed, pushed
     database:  snapshot 2026-07-08T15-04-22Z uploaded
-    secrets:   not pushed (sync: pull-only — provider is source of truth)
     session:   synced
 ✓ Safe to switch machines.
 ```
 
-1. **Git** — surfaces uncommitted/unpushed work; `--commit` or `--stash`, then push. **Refuses to silently drop work** without `--force`.
-2. **Database** — migrations-only by default. A snapshot is taken only when it's worth it: `--snapshot`, or change-detection finds drift on watched tables (then prompts). Dumps via the DB's own tools, **encrypted at rest by default**, pushed to your sync target, pruned to the last N.
-3. **Session** — push the Claude Code session outward.
-4. **Secrets** — not pushed by default (your provider is the source of truth; opt into two-way sync in config).
-5. **Report** — what was pushed, and what was intentionally left behind.
+Surfaces uncommitted/unpushed work (`--commit` or `--stash`, then push — **refuses to drop work** without `--force`), snapshots the DB only when it changed (or `--snapshot` to force), and pushes your Claude session. Secrets aren't pushed by default — your provider is the source of truth.
 
-> Both verbs support `--dry-run` to preview every action without changing anything.
+> Both commands support `--dry-run` to preview every action without changing anything.
 
 ---
 
-## Supported platforms
+## All commands
 
-Every concern is a small swappable interface with built-ins in-tree. Mix and match — a work GitHub with a personal Doppler vault and an S3 bucket is a normal setup.
+Everyday work:
 
-| Concern | Supported | Notes |
-|---|---|---|
-| **Code** | `git` | any git remote — GitHub, GitLab, self-hosted |
-| **Secrets** | `doppler`, `1password` | pulled into a gitignored `.env`; optional two-way sync |
-| **Container** | `devcontainer`, `compose` | brought up on resume, left running on pause by default |
-| **Database** | `postgres`, `mysql` | dump/restore via the DB's own tools; migrations always applied |
-| **AI session** | `claude-sync`, `remote-control`, `none` | Claude Code session state, per project/workspace/global scope |
-| **Sync target** | `local-folder`, `syncthing`, `s3` | where DB snapshots + sessions live |
-| **At-rest encryption** | `age`, `gpg` | snapshots & sessions encrypted by default when keys exist |
-
-**S3 sync works with any S3-compatible provider** — the setup wizard asks which one and pre-fills the endpoint & region:
-
-| Cloudflare R2 · Hetzner Object Storage · Backblaze B2 · AWS S3 · any other S3-compatible bucket |
-|:--:|
-
-Third-party providers drop into `~/.envbeam/plugins/` and implement the same interface (see [Providers](#providers-plugins) below).
-
----
-
-## Command reference
-
-| Command | Purpose |
+| Command | What it does |
 |---|---|
-| `envbeam init [project]` | Scaffold a `.envbeam.yaml` — or bootstrap a registered project by name. |
-| `envbeam resume` / `pull` | Pull state and get ready to work. Idempotent. |
-| `envbeam pause` / `push` | Push state so you can switch machines. |
-| `envbeam status` | Read-only "what would resume/pause do". `--json` for machines. |
-| `envbeam doctor` | Check required tools/auth **and** print the detection report. `--fix` writes gaps into config. |
-| `envbeam identity add\|list\|test\|remove` | Manage named accounts. Credentials → OS keychain / `0600` file, **never** the repo. |
-| `envbeam config validate\|explain\|sync` | Validate against the JSON Schema, explain fields, or propose config additions (`--write`). |
-| `envbeam storage setup\|status` | Configure global S3-compatible storage. |
+| [`envbeam pull`](#envbeam-pull--get-this-machine-ready-to-work) · `resume` | Pull state and get ready to work. |
+| [`envbeam push`](#envbeam-push--safely-hand-off-this-machine) · `pause` | Push state so you can switch machines. |
+| [`envbeam status`](#status--doctor) | Read-only view of git/secrets/container/DB/session. `--json` for scripts. |
+
+Setup & health:
+
+| Command | What it does |
+|---|---|
+| `envbeam init [project]` | Scaffold `.envbeam.yaml`, or bootstrap a registered project by name. |
+| [`envbeam doctor`](#status--doctor) | Check tools/auth **and** print the detection report. `--fix` writes gaps into config. |
+| `envbeam identity add\|list\|test\|remove` | Manage [named accounts](#identities-multi-account). Credentials → OS keychain, never the repo. |
+| `envbeam storage setup\|status` | Configure [global S3-compatible storage](#global-storage). |
 | `envbeam session setup\|status` | Configure Claude session sync (generates encryption keys). |
-| `envbeam list \| pull <project> \| delete <project>` | List projects across machines, bootstrap one locally, or remove one. |
+| `envbeam config validate\|explain\|sync` | Validate, explain, or auto-propose [config](#configuration) additions (`--write`). |
+
+Across machines (needs global storage):
+
+| Command | What it does |
+|---|---|
+| [`envbeam list`](#working-across-machines) | List every project registered across your machines. |
+| `envbeam pull <project>` | Bootstrap a registered project on a fresh machine (clone + secrets + up). |
+| `envbeam delete <project>` | Remove a project from the registry and remote storage. |
 
 Global flags: `--dry-run`, `-y/--yes`, `-v/--verbose`, `-q/--quiet`.
 
-### `envbeam status`
+### `status` & `doctor`
 
-A read-only glance — no side effects.
+`status` is a read-only glance — no side effects:
 
 ```console
 $ envbeam status
@@ -214,15 +205,10 @@ Workspace: my-app  (github:work)
   session   ready  claude-sync (workspace scope)
 ```
 
-### `envbeam doctor`
-
-Checks tools/auth and shows exactly what detection could and couldn't infer.
+`doctor` checks tools/auth and shows exactly what detection could and couldn't infer:
 
 ```console
 $ envbeam doctor
-envbeam doctor
-workspace: /Users/you/code/my-app
-
 Environment
   ✓ git 2.39.5 (git) · authenticated
   ✓ doppler 3.68.0 (secrets) · authenticated
@@ -232,64 +218,72 @@ Environment
 
 Detection report
   ✓ git.url                  git@github.com:acme/my-app.git
-  ✓ git.branch               main
   ✓ container.mode           compose
   ✓ database.engine          postgres
-  ? database.service         (ambiguous)
-      candidates: db, postgres
-  · session.provider         —
+  ? database.service         (ambiguous)   candidates: db, postgres
 
 ✓ Environment looks good.
 ```
 
-### `envbeam identity list`
+### Working across machines
 
-```console
-$ envbeam identity list
-Identities
-  github:work              type=git  sshHost=github-work
-  doppler:personal         type=doppler  token✓
-  s3:personal              type=s3  profile=personal
-```
-
-### `envbeam list`
-
-Every project registered across your machines (needs global storage configured).
+With [global storage](#global-storage) configured, every `push` registers the project so any machine can see and bootstrap it:
 
 ```console
 $ envbeam list
 Registered Projects
 
 NAME           LAST PUSH     MACHINE
-──────────────────────────────────────────────
+──────────────────────────────────────
 my-app         2026-07-08    laptop
 data-pipeline  2026-07-05    cloud-vm
 
 2 project(s) total
 ```
 
-Bootstrap any of them on a fresh machine with `envbeam pull my-app` — it clones, loads secrets, and brings everything up.
+Then `envbeam pull my-app` on a fresh machine clones it, loads secrets, and brings everything up.
+
+---
+
+## Supported platforms
+
+Every concern is a swappable interface — mix and match freely (a work GitHub with a personal Doppler vault and an S3 bucket is a normal setup).
+
+| Concern | Supported |
+|---|---|
+| **Code** | `git` (GitHub, GitLab, self-hosted) |
+| **Secrets** | `doppler`, `1password` |
+| **Container** | `devcontainer`, `compose` |
+| **Database** | `postgres`, `mysql` |
+| **AI session** | `claude-sync`, `remote-control`, `none` |
+| **Sync target** | `local-folder`, `syncthing`, `s3` |
+| **At-rest encryption** | `age`, `gpg` (on by default when keys exist) |
+
+**S3 sync works with any S3-compatible provider** — the setup wizard asks which and pre-fills the endpoint & region:
+
+> Cloudflare R2 · Hetzner Object Storage · Backblaze B2 · AWS S3 · any other S3-compatible bucket
+
+Need something else? [Third-party plugins](#plugins) drop into `~/.envbeam/plugins/`.
 
 ---
 
 ## Configuration
 
-`.envbeam.yaml` lives at the workspace root and is committed to git. It holds **no secrets** — only references. It's **detection-first**: omit a field and it's auto-detected at run time; include it only to override a wrong guess. A real config is often just identities + database mode/target:
+`.envbeam.yaml` lives at the workspace root and is committed to git. It holds **no secrets** — only references — and is **detection-first**: omit a field and it's auto-detected; include it only to override a wrong guess. A real config is often this short:
 
 ```yaml
 version: 1
 workspace: my-app
-git:      { identity: github:work }
-secrets:  { provider: doppler, identity: doppler:personal, project: my-app, config: dev }
+secrets:  { provider: doppler, project: my-app, config: dev }
 database: { mode: snapshot, sync: { target: s3, keep: 5 } }
 session:  { provider: claude-sync }
 ```
 
-Everything else — branch, container mode, DB engine/service, migrate command, secret key names — is detected. Run `envbeam config explain [field]` to see what any field means, or check [`schema/envbeam.schema.json`](schema/envbeam.schema.json).
+Everything else — branch, container mode, DB engine/service, migrate command, secret keys — is detected. Run `envbeam config explain [field]` for docs on any field, or point Claude Code at the repo and let it edit the config, then `envbeam config validate`.
 
 ### Identities (multi-account)
 
-Each concern routes through a **named identity**, so a work GitHub and a personal one — or a work 1Password vault and a personal one — coexist and are chosen per workspace. Identities are defined once in `~/.envbeam/config.yaml`; the repo only ever *names* them:
+Only needed when you route between **multiple accounts** (work vs. personal GitHub, two Doppler vaults). Define them once in `~/.envbeam/config.yaml`; the repo only ever *names* them:
 
 ```yaml
 # ~/.envbeam/config.yaml
@@ -297,61 +291,40 @@ identities:
   github:work:      { type: git, sshHost: github-work }
   github:personal:  { type: git, sshHost: github-personal }
   doppler:personal: { type: doppler }
-  s3:personal:      { type: s3, profile: personal }
 ```
 
-Tokens (where needed) are stored in the OS keychain (macOS `security`, Linux `secret-tool`) or a `0600` file — **never in the repo**.
+Then reference one in `.envbeam.yaml`, e.g. `git: { identity: github:work }`. Tokens are stored in the OS keychain (macOS `security`, Linux `secret-tool`) or a `0600` file — **never in the repo**.
 
 ### Global storage
 
-Global storage powers the cross-machine project registry and S3-based session/DB sync. `envbeam storage setup` works with **any S3-compatible provider** — it asks which one and pre-fills the endpoint & region. Credentials are stored as `ENVBEAM_S3_*` secrets in the `envbeam-global` Doppler project; if they already exist, both `storage setup` and `init` offer to **reuse** them. For non-interactive setup, pass `--endpoint`, `--bucket`, `--region`, `--access-key`, and `--secret-key`.
+Powers the cross-machine project registry and S3-based session/DB sync. `envbeam storage setup` works with any S3-compatible provider — it asks which one and pre-fills endpoint & region. Credentials live as `ENVBEAM_S3_*` secrets in the `envbeam-global` Doppler project and are **reused** automatically if already present. For non-interactive setup, pass `--endpoint`, `--bucket`, `--region`, `--access-key`, `--secret-key`.
 
----
+### Plugins
 
-## Providers (plugins)
-
-Third-party plugins drop into `~/.envbeam/plugins/` and implement the same interface — a directory whose entry exports a `ProviderFactory` (or array), or a `register(registry)` function:
+Third-party providers implement the same interface as the built-ins — a directory in `~/.envbeam/plugins/` whose entry exports a `ProviderFactory` (or array), or a `register(registry)` function:
 
 ```js
 // ~/.envbeam/plugins/my-secrets/index.mjs
-export default [{
-  kind: 'secrets',
-  name: 'vault',
-  identityType: 'vault',
-  create: () => new MyVaultProvider(),
-}];
+export default [{ kind: 'secrets', name: 'vault', identityType: 'vault', create: () => new MyVaultProvider() }];
 ```
 
-Provider interfaces are exported from the package for type-safe authoring:
-
-```ts
-import type { SecretsProvider } from 'envbeam';
-```
-
-### AI-assisted configuration
-
-`.envbeam.yaml` is plain declarative YAML with a published JSON Schema, designed to be edited by an agent:
-
-- `envbeam config sync` does deterministic repo inspection (compose, `.devcontainer/`, migration dirs, ORM config, `.env.example`, lockfiles) and proposes a diff — apply with `--write`.
-- Point Claude Code at the repo to edit the config directly, then run `envbeam config validate` to check it.
+Interfaces are exported for type-safe authoring: `import type { SecretsProvider } from 'envbeam'`.
 
 ---
 
 ## Guarantees
 
-- **Local-only.** No third-party hosted dev environment. No envbeam backend.
+- **Local-only** — no hosted dev environment, no envbeam backend.
 - **Secrets never land in git** — materialized files are gitignored automatically.
-- **Database data boundary.** envbeam only shells out to `pg_dump`/`pg_restore`/`mysqldump`; the snapshot file is the sole artifact and lives only where your config points. Snapshots are **encrypted at rest by default** and integrity-checked against a Doppler-anchored hash before restore.
-- **Non-destructive by default.** No command silently discards uncommitted/unpushed work or local DB state; destructive actions need confirmation or `--force`.
-- **Idempotent.** `resume` and `status` converge without side effects.
-- **Stack-agnostic.** Environment specifics live in the Dev Container, not in envbeam.
-- **Observable.** `--dry-run`, ordered human-readable output, non-zero exit codes on failure.
+- **Database data boundary** — envbeam only shells out to `pg_dump`/`pg_restore`/`mysqldump`; the snapshot is the sole artifact, lives only where your config points, is **encrypted at rest by default**, and is integrity-checked against a Doppler-anchored hash before restore.
+- **Non-destructive by default** — no command discards uncommitted work or local DB state without confirmation or `--force`.
+- **Idempotent & observable** — `pull`/`status` re-run safely; `--dry-run`, ordered output, non-zero exit on failure.
 
 ---
 
 ## Development
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for the architecture map, dev-environment setup, and design decisions.
+See [DEVELOPMENT.md](DEVELOPMENT.md) for the architecture map and design decisions.
 
 ```bash
 npm install
@@ -361,7 +334,7 @@ npm run build          # → dist/
 npm run schema:gen     # regenerate schema/envbeam.schema.json
 ```
 
-Integration tests use real tools when present (git always; Docker for Postgres / Compose / Dev Containers, auto-skipped when the daemon is down). Everything else is exercised deterministically through an injectable command runner, so all providers are covered without real credentials.
+Every external CLI call goes through an injectable command runner, so all providers are covered deterministically without real credentials. Integration tests use real tools when present (git always; Docker for Postgres / Compose / Dev Containers, auto-skipped when the daemon is down).
 
 ## License
 
