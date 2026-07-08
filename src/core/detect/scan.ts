@@ -45,6 +45,47 @@ export interface ShallowScanOptions {
 }
 
 /**
+ * Breadth-first collection of ALL files whose basename is in `names`, scanning
+ * the root and up to `maxDepth` levels of subdirectories (same ignore rules as
+ * findFileShallow). Returns absolute paths, shallowest first, deterministic.
+ */
+export async function findFilesShallow(
+  root: string,
+  names: readonly string[],
+  opts: ShallowScanOptions = {},
+): Promise<string[]> {
+  const maxDepth = opts.maxDepth ?? 2;
+  const ignore = new Set(IGNORE_DIRS);
+  for (const extra of opts.ignore ?? []) ignore.add(extra);
+  const wanted = new Set(names);
+  const found: string[] = [];
+
+  let frontier: string[] = [root];
+  for (let depth = 0; depth <= maxDepth && frontier.length; depth++) {
+    const nextFrontier: string[] = [];
+    for (const dir of frontier) {
+      let entries: Dirent[];
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          if (depth < maxDepth && !ignore.has(entry.name) && !entry.name.startsWith('.git')) {
+            nextFrontier.push(path.join(dir, entry.name));
+          }
+        } else if (entry.isFile() && wanted.has(entry.name)) {
+          found.push(path.join(dir, entry.name));
+        }
+      }
+    }
+    frontier = nextFrontier.sort();
+  }
+  return found;
+}
+
+/**
  * Breadth-first search for the first file whose basename is in `names`,
  * scanning the root and up to `maxDepth` levels of subdirectories.
  *

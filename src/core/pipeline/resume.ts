@@ -10,6 +10,7 @@ import { createSyncTarget, encryptionSuffix, decryptFile, type SnapshotEntry } f
 import { PreflightError } from '../util/errors.js';
 import { ensureTools } from '../util/tools.js';
 import { ensureDockerRunning } from '../util/docker.js';
+import { installRuntimeDeps, type DepsReport } from './deps.js';
 import { sessionSummary } from './format.js';
 import type { GitPullResult, MaterializeResult, ContainerStatus } from '../providers/types.js';
 
@@ -17,6 +18,7 @@ export interface ResumeReport {
   identity?: string;
   git?: GitPullResult & { branch: string; commit?: string };
   secrets?: { count: number; materialized?: MaterializeResult };
+  deps?: DepsReport;
   session?: { action: string; detail?: string };
   container?: ContainerStatus;
   database?: {
@@ -123,7 +125,11 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
     }
   }
 
-  // 4. Session
+  // 4. Dependencies — detect language toolchains from lockfiles, install the
+  // package manager if missing, and sync project deps (best-effort, non-fatal).
+  report.deps = (await installRuntimeDeps(ctx)) ?? undefined;
+
+  // 5. Session
   if (active.session) {
     log.step('Session');
     const res = await active.session.pull(ctx.providerCtx('session'));
@@ -295,6 +301,11 @@ function printResumeReport(ctx: RunContext, report: ResumeReport): void {
   if (report.identity) lines.push(`identity:  ${report.identity}`);
   if (report.git) lines.push(`branch:    ${report.git.branch} (${report.git.action})`);
   if (report.secrets) lines.push(`secrets:   ${report.secrets.count} written to ${report.secrets.materialized?.path ?? '.env'}`);
+  if (report.deps) {
+    lines.push(
+      `deps:      ${report.deps.synced.length} synced${report.deps.failed.length ? `, ${report.deps.failed.length} failed (${report.deps.failed.join(', ')})` : ''}`,
+    );
+  }
   if (report.container) lines.push(`container: ${report.container.running ? 'up' : 'not running'}`);
   if (report.database) {
     const r = report.database.restored

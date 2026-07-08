@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-07-08
+
+### Added
+- **Language dependency sync on `pull`/`resume`** — a new Dependencies step detects the project's toolchains from lockfiles (root + two levels deep, vendor dirs skipped), **installs the package manager itself if missing** (uv, poetry, pipenv, pnpm, yarn, bun, npm, bundler, composer, go, cargo — per the auto-install rule), then syncs dependencies against the just-pulled lockfiles: `uv sync`, `poetry install`, `pnpm install`, `npm ci` (or `npm install` when `node_modules` exists), `go mod download`, `cargo fetch`, `bundle install`, `composer install`. Monorepos work naturally (workspace lockfiles live at the root; per-app lockfiles like `apps/web/package-lock.json` get their own install). Best-effort: failures warn and are listed in the report (`deps: 2 synced`), never block the resume. So after `envbeam pull`, things like `make api` (`uv run uvicorn …`) work immediately.
+
 ## [0.11.7] - 2026-07-08
 
 ### Added

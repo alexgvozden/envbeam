@@ -178,6 +178,113 @@ export const TOOLS: Record<string, ToolDef> = {
     checkArgs: ['--version'],
     url: 'https://dev.mysql.com/downloads/',
   },
+  // ---- language package managers (project dependency sync on pull) ----
+  uv: {
+    command: 'uv',
+    name: 'uv (Python)',
+    installCommands: {
+      win32: 'winget install --id=astral-sh.uv -e',
+      darwin: 'brew install uv',
+      linux: 'curl -LsSf https://astral.sh/uv/install.sh | sh',
+    },
+    checkArgs: ['--version'],
+    url: 'https://docs.astral.sh/uv/getting-started/installation/',
+  },
+  poetry: {
+    command: 'poetry',
+    name: 'Poetry (Python)',
+    installCommands: {
+      win32: 'pip install --user poetry',
+      darwin: 'brew install poetry',
+      linux: 'curl -sSL https://install.python-poetry.org | python3 -',
+    },
+    checkArgs: ['--version'],
+    url: 'https://python-poetry.org/docs/#installation',
+  },
+  pipenv: {
+    command: 'pipenv',
+    name: 'Pipenv (Python)',
+    installCommands: {
+      win32: 'pip install --user pipenv',
+      darwin: 'brew install pipenv',
+      linux: 'pip install --user pipenv',
+    },
+    checkArgs: ['--version'],
+  },
+  // Node package managers install via npm, which is guaranteed present (envbeam runs on Node).
+  pnpm: {
+    command: 'pnpm',
+    name: 'pnpm',
+    installCommands: {
+      win32: 'npm install -g pnpm',
+      darwin: 'npm install -g pnpm',
+      linux: 'npm install -g pnpm',
+    },
+    checkArgs: ['--version'],
+  },
+  yarn: {
+    command: 'yarn',
+    name: 'Yarn',
+    installCommands: {
+      win32: 'npm install -g yarn',
+      darwin: 'npm install -g yarn',
+      linux: 'npm install -g yarn',
+    },
+    checkArgs: ['--version'],
+  },
+  bun: {
+    command: 'bun',
+    name: 'Bun',
+    installCommands: {
+      win32: 'npm install -g bun',
+      darwin: 'npm install -g bun',
+      linux: 'npm install -g bun',
+    },
+    checkArgs: ['--version'],
+  },
+  bundle: {
+    command: 'bundle',
+    name: 'Bundler (Ruby)',
+    installCommands: {
+      win32: 'gem install bundler',
+      darwin: 'gem install bundler',
+      linux: 'gem install bundler',
+    },
+    checkArgs: ['--version'],
+  },
+  composer: {
+    command: 'composer',
+    name: 'Composer (PHP)',
+    installCommands: {
+      win32: 'winget install Composer.Composer',
+      darwin: 'brew install composer',
+      linux: 'sudo apt-get install -y composer || sudo dnf install -y composer',
+    },
+    checkArgs: ['--version'],
+    url: 'https://getcomposer.org/download/',
+  },
+  go: {
+    command: 'go',
+    name: 'Go toolchain',
+    installCommands: {
+      win32: 'winget install GoLang.Go',
+      darwin: 'brew install go',
+      linux: 'sudo apt-get install -y golang || sudo dnf install -y golang',
+    },
+    checkArgs: ['version'],
+    url: 'https://go.dev/dl/',
+  },
+  cargo: {
+    command: 'cargo',
+    name: 'Cargo (Rust)',
+    installCommands: {
+      win32: 'winget install Rustlang.Rustup',
+      darwin: 'brew install rust',
+      linux: "curl https://sh.rustup.rs -sSf | sh -s -- -y",
+    },
+    checkArgs: ['--version'],
+    url: 'https://rustup.rs/',
+  },
 };
 
 function getPlatform(): 'win32' | 'darwin' | 'linux' {
