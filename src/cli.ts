@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { Command } from 'commander';
 import pc from 'picocolors';
 import { setCommandTrace } from './core/util/exec.js';
@@ -28,6 +31,58 @@ import type { GlobalCliOptions } from './commands/shared.js';
 const require = createRequire(import.meta.url);
 const { version: VERSION } = require('../package.json') as { version: string };
 
+// Build stamp written into dist/ at compile time (scripts/write-build-info.mjs).
+// Lets us detect when the compiled code is STALE relative to package.json —
+// e.g. `git pull` without a rebuild — instead of silently running old code
+// while `-V` (which reads package.json at runtime) claims the new version.
+interface BuildInfo {
+  version: string;
+  commit?: string;
+  builtAt?: string;
+}
+let BUILD: BuildInfo | null = null;
+try {
+  BUILD = require('./build-info.json') as BuildInfo;
+} catch {
+  /* dev run via tsx, or a build predating the stamp */
+}
+
+/**
+ * If dist/ was built from a different version than the installed package.json,
+ * self-heal: rebuild in place (source checkouts) and re-exec the command, or —
+ * when there's no source to build from — warn loudly with the reinstall command.
+ */
+function ensureFreshBuild(): void {
+  if (!BUILD || BUILD.version === VERSION || process.env.ENVBEAM_SKIP_REBUILD) return;
+
+  console.error(
+    pc.yellow(`! envbeam build is stale: running code built for v${BUILD.version}, but v${VERSION} is installed.`),
+  );
+
+  const root = path.dirname(require.resolve('../package.json'));
+  const canRebuild =
+    fs.existsSync(path.join(root, 'tsconfig.build.json')) && fs.existsSync(path.join(root, 'src'));
+
+  if (canRebuild && !process.env.ENVBEAM_REBUILT) {
+    console.error(pc.yellow('  rebuilding envbeam…'));
+    const build = spawnSync('npm', ['run', 'build'], {
+      cwd: root,
+      stdio: 'inherit',
+      shell: process.platform === 'win32',
+    });
+    if (build.status === 0) {
+      // Re-exec the original command against the fresh build.
+      const rerun = spawnSync(process.execPath, process.argv.slice(1), {
+        stdio: 'inherit',
+        env: { ...process.env, ENVBEAM_REBUILT: '1' },
+      });
+      process.exit(rerun.status ?? 0);
+    }
+    console.error(pc.red('  rebuild failed — reinstall instead:'));
+  }
+  console.error(pc.dim('  npm i -g "git+ssh://git@github.com/alexgvozden/envbeam.git#main"'));
+}
+
 function globalOpts(cmd: Command): GlobalCliOptions {
   const g = cmd.optsWithGlobals();
   // Verbose → trace every external command + exit code to stderr.
@@ -41,11 +96,16 @@ function globalOpts(cmd: Command): GlobalCliOptions {
 }
 
 async function main(): Promise<void> {
+  ensureFreshBuild();
   const program = new Command();
+  // -V includes the build stamp so a stale dist can never masquerade as fresh.
+  const versionString = BUILD?.commit
+    ? `${VERSION} (build ${BUILD.commit}${BUILD.builtAt ? `, ${BUILD.builtAt}` : ''})`
+    : VERSION;
   program
     .name('envbeam')
     .description('Beam your whole dev environment to any machine. Pause here, resume there.')
-    .version(VERSION, '-V, --version')
+    .version(versionString, '-V, --version')
     .option('--dry-run', 'preview actions without changing anything')
     .option('-y, --yes', 'assume yes / accept defaults (non-interactive)')
     .option('-v, --verbose', 'verbose output')

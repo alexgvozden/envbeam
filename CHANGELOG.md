@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.5] - 2026-07-08
+
+### Fixed
+- **Stale builds can no longer masquerade as new versions** — root cause of "the fix didn't work": `-V` read `package.json` at runtime, so a `git pull` without a rebuild reported the new version while executing old compiled code (which predated the Docker auto-start entirely). The build now stamps `dist/build-info.json` (version + git sha + timestamp); `-V` prints it (`0.11.5 (build abc1234, …)`), and on a version mismatch the CLI **rebuilds itself and re-runs your command** (source checkouts) or prints the exact reinstall command. Escape hatch: `ENVBEAM_SKIP_REBUILD=1`.
+- Empirically verified the Docker 25.0.3 daemon quirk against the real 25.0.3 CLI: dead daemon → exit 0, empty stdout, error on stderr — the digit-check from 0.11.4 handles it correctly.
+
 ## [0.11.4] - 2026-07-08
 
 ### Fixed

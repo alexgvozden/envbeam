@@ -53,7 +53,8 @@ describe('CLI end-to-end (compiled dist)', () => {
   it('reports version and help', async () => {
     if (!built) return;
     const { dir, home } = await ws();
-    expect((await eb(dir, home, '--version')).out.trim()).toBe(PKG_VERSION);
+    // Version output is stamped with build info, e.g. "0.11.5 (build abc1234, …)".
+    expect((await eb(dir, home, '--version')).out.trim()).toMatch(new RegExp(`^${PKG_VERSION.replace(/\./g, '\\.')}`));
     const help = await eb(dir, home, '--help');
     expect(help.out).toMatch(/Beam your whole dev environment/);
     expect(help.out).toMatch(/resume[\s\S]*pause[\s\S]*doctor/);

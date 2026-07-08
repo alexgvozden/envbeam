@@ -1,6 +1,6 @@
 {
   "name": "envbeam",
-  "version": "0.11.4",
+  "version": "0.11.5",
   "description": "Beam your whole dev environment to any machine or VM. Pause here, resume there: code + secrets + container + database + AI session, under the right account for each.",
   "type": "module",
   "bin": {
@@ -19,7 +19,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/write-build-info.mjs",
     "prepare": "npm run build",
     "dev": "tsx src/cli.ts",
     "envbeam": "tsx src/cli.ts",
