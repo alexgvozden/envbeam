@@ -215,9 +215,11 @@ export class ClaudeNativeProvider implements SessionProvider {
     };
     await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2));
 
+    // `--` ends option parsing: Claude project dir names start with '-'
+    // (e.g. -Users-me-Code-app) and tar would otherwise read them as flags.
     const tarRes = await ctx.runner.run(
       'tar',
-      ['-czf', archivePath, '-C', path.dirname(source.dir), path.basename(source.dir)],
+      ['-czf', archivePath, '-C', path.dirname(source.dir), '--', path.basename(source.dir)],
       { cwd: ctx.workspaceRoot, allowFailure: true },
     );
     if (tarRes.code !== 0) {

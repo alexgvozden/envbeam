@@ -64,6 +64,36 @@ describe('claude-native session discovery', () => {
     expect(status.detail).toContain(path.join(cfg, projectDir));
   });
 
+  it('tars the dash-prefixed project dir safely (-- ends option parsing)', async () => {
+    const { dir: ws, cleanup: c1 } = await tmpDir();
+    const { dir: cfg, cleanup: c2 } = await tmpDir('claude-cfg-');
+    const { dir: sync, cleanup: c3 } = await tmpDir('sync-');
+    cleanups.push(c1, c2, c3);
+    const sanitized = claudeProjectDirName(ws); // starts with '-'
+    await writeFiles(cfg, { [path.join('projects', sanitized, 'abc.jsonl')]: '{}\n' });
+    process.env.CLAUDE_CONFIG_DIR = cfg;
+
+    const runner = new FakeRunner({ available: ['tar'] });
+    runner.on('tar', {});
+    const provider = new ClaudeNativeProvider();
+    const ctx = makeTestContext({
+      config: {
+        version: 1,
+        workspace: 'synthetic-signals',
+        session: { provider: 'claude-native', scope: 'project', sync: { target: 'local-folder', path: sync } },
+      },
+      runner,
+      workspaceRoot: ws,
+    }).providerCtx('session');
+
+    await provider.push(ctx); // stops later at encryption keys — tar already ran
+    const tarCall = runner.calls.find((c) => c.command === 'tar')!;
+    expect(tarCall).toBeTruthy();
+    const dashIdx = tarCall.args.indexOf('--');
+    expect(dashIdx).toBeGreaterThan(-1);
+    expect(tarCall.args[dashIdx + 1]).toBe(sanitized); // '-Users-…' comes AFTER --
+  });
+
   it('reports every searched location when no data exists', async () => {
     const { dir: ws, cleanup: c1 } = await tmpDir();
     const { dir: cfg, cleanup: c2 } = await tmpDir('claude-empty-');
