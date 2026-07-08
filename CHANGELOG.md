@@ -1,14 +1,14 @@
-## [0.15.0] - 2026-07-08
-
-### Added
-- **Detect all database URLs by scheme + warn on ambiguity** — `findDatabaseUrls` finds every Postgres/MySQL connection URL in the environment by its scheme (not by a hard-coded var name). When more than one URL of the same engine is present, `push`/`pull` now warn (naming the one envbeam picked) so you can pin `database.connection` and not silently snapshot/restore the wrong database.
-
 # Changelog
 
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.15.0] - 2026-07-08
+
+### Added
+- **Detect all database URLs by scheme + warn on ambiguity** — `findDatabaseUrls` finds every Postgres/MySQL connection URL in the environment by its scheme (not by a hard-coded var name). When more than one URL of the same engine is present, `push`/`pull` now warn (naming the one envbeam picked) so you can pin `database.connection` and not silently snapshot/restore the wrong database.
 
 ## [0.14.1] - 2026-07-08
 
