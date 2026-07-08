@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-07-08
+
+### Fixed
+- **Updates now actually take effect** — added a `prepare` script so `dist/` (which is gitignored and drives the `envbeam` bin) is rebuilt on every install, local or from a git URL. Previously `git pull` without a manual `npm run build`, or `npm i -g github:…`, left the CLI running stale/absent compiled code — so pushed fixes never reached the machine.
+
 ## [0.11.0] - 2026-07-07
 
 ### Added
