@@ -1,6 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
+import pc from 'picocolors';
 import type {
   SessionProvider,
   SessionResult,
@@ -21,12 +22,69 @@ import { ensureDir, pathExists } from '../../util/fs.js';
 import { machineName } from '../database/base.js';
 
 /**
- * Native Claude session sync - syncs Claude Code session data to S3/storage.
+ * Claude Code stores a project's sessions under
+ * `<config-dir>/projects/<sanitized-path>/`, where the sanitized name is the
+ * absolute workspace path with every non-alphanumeric character replaced by
+ * '-'. The LEADING DASH IS KEPT: /Users/me/app → -Users-me-app.
+ */
+export function claudeProjectDirName(workspaceRoot: string): string {
+  return workspaceRoot.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+export interface ParsedSessionName {
+  workspace: string;
+  scope: string;
+  machine: string;
+  timestamp: string;
+}
+
+/**
+ * Parse `claude-session-<workspace>-<scope>-<machine>-<ts>.tar.gz`. Workspace
+ * and machine names routinely contain dashes (e.g. "synthetic-signals",
+ * hostnames), so anchor on the scope keyword and the timestamp shape instead
+ * of assuming dash-free segments.
+ */
+export function parseSessionFileName(name: string): ParsedSessionName | null {
+  const m = name.match(
+    /^claude-session-(.+)-(project|workspace|global)-(.+)-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})\.tar\.gz$/,
+  );
+  if (!m) return null;
+  return { workspace: m[1]!, scope: m[2]!, machine: m[3]!, timestamp: m[4]! };
+}
+
+/** Newest .jsonl mtime in a directory (falls back to the dir's own mtime). */
+async function newestActivity(dir: string): Promise<number> {
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    let newest = 0;
+    for (const e of entries) {
+      if (e.isFile() && e.name.endsWith('.jsonl')) {
+        const st = await fs.stat(path.join(dir, e.name));
+        if (st.mtimeMs > newest) newest = st.mtimeMs;
+      }
+    }
+    if (newest) return newest;
+    return (await fs.stat(dir)).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+interface ResolvedSessionPath {
+  /** Directory holding the session data (or where it should be restored). */
+  dir: string;
+  /** The Claude config dir it belongs to (equal to `dir` for workspace scope). */
+  configDir: string;
+  exists: boolean;
+}
+
+/**
+ * Native Claude session sync — syncs Claude Code session data to S3/storage.
  *
  * Scope options:
- * - project: ~/.claude/projects/<workspace-path>/ (default)
+ * - project: <claude-config>/projects/<sanitized-path>/ (default)
  * - workspace: .claude/ folder in the workspace root
- * - global: ~/.claude/ (tools, plugins, all sessions)
+ * - global: the whole Claude config dir (tools, plugins, all sessions)
  */
 export class ClaudeNativeProvider implements SessionProvider {
   readonly name = 'claude-native';
@@ -37,37 +95,65 @@ export class ClaudeNativeProvider implements SessionProvider {
     return [];
   }
 
-  private getClaudeHome(): string {
-    return process.env.CLAUDE_HOME ?? path.join(os.homedir(), '.claude');
+  /**
+   * Candidate Claude config dirs. An explicit CLAUDE_CONFIG_DIR (Claude Code's
+   * own env var, often set via a shell alias) or legacy CLAUDE_HOME wins;
+   * otherwise every ~/.claude* directory is a candidate — users run Claude
+   * with alternate config dirs like ~/.claude-personal.
+   */
+  private async candidateConfigDirs(): Promise<{ dirs: string[]; fromEnv: boolean }> {
+    const env = process.env.CLAUDE_CONFIG_DIR ?? process.env.CLAUDE_HOME;
+    if (env) return { dirs: [path.resolve(env)], fromEnv: true };
+
+    const home = os.homedir();
+    const dirs: string[] = [];
+    try {
+      for (const e of await fs.readdir(home, { withFileTypes: true })) {
+        if (e.isDirectory() && e.name.startsWith('.claude')) dirs.push(path.join(home, e.name));
+      }
+    } catch {
+      /* unreadable home — fall through */
+    }
+    if (!dirs.length) dirs.push(path.join(home, '.claude'));
+    return { dirs: dirs.sort(), fromEnv: false };
   }
 
-  private getProjectSessionPath(workspaceRoot: string): string {
-    // Claude Code stores sessions in ~/.claude/projects/<sanitized-path>/
-    const sanitized = workspaceRoot.replace(/[\\/:]/g, '-').replace(/^-+/, '');
-    return path.join(this.getClaudeHome(), 'projects', sanitized);
-  }
+  /**
+   * Resolve where this scope's Claude data lives (or should be restored to):
+   * among the candidate config dirs, pick the one with the most recent
+   * session activity for this project; fall back to the first candidate.
+   */
+  private async resolveSessionPath(scope: string, workspaceRoot: string): Promise<ResolvedSessionPath> {
+    if (scope === 'workspace') {
+      const p = path.join(workspaceRoot, '.claude');
+      return { dir: p, configDir: p, exists: await pathExists(p) };
+    }
+    const { dirs } = await this.candidateConfigDirs();
+    const sub = scope === 'global' ? '' : path.join('projects', claudeProjectDirName(workspaceRoot));
 
-  private getWorkspaceClaudePath(workspaceRoot: string): string {
-    return path.join(workspaceRoot, '.claude');
+    let best: { dir: string; configDir: string; activity: number } | null = null;
+    for (const configDir of dirs) {
+      const dir = sub ? path.join(configDir, sub) : configDir;
+      if (!(await pathExists(dir))) continue;
+      const activity = await newestActivity(dir);
+      if (!best || activity > best.activity) best = { dir, configDir, activity };
+    }
+    if (best) return { dir: best.dir, configDir: best.configDir, exists: true };
+
+    const def = dirs[0]!;
+    return { dir: sub ? path.join(def, sub) : def, configDir: def, exists: false };
   }
 
   private async getSyncTarget(ctx: ProviderContext) {
     // Use session.sync if configured, else fall back to database.sync
-    const syncConfig: SyncConfig | undefined =
-      ctx.config.session?.sync ?? ctx.config.database?.sync;
-
-    if (!syncConfig) {
-      return null;
-    }
+    const syncConfig: SyncConfig | undefined = ctx.config.session?.sync ?? ctx.config.database?.sync;
+    if (!syncConfig) return null;
 
     // Ensure S3 credentials are available
     if (syncConfig.target === 's3' && !process.env.ENVBEAM_S3_ACCESS_KEY) {
       const globalStorage = await getGlobalStorageConfig(ctx.runner);
-      if (globalStorage) {
-        injectStorageEnv(globalStorage);
-      }
+      if (globalStorage) injectStorageEnv(globalStorage);
     }
-
     return createSyncTarget(syncConfig, ctx.identity);
   }
 
@@ -76,22 +162,15 @@ export class ClaudeNativeProvider implements SessionProvider {
     return `claude-session-${workspace}-${scope}-${machine}-${timestamp}.tar.gz`;
   }
 
-  private parseSessionFileName(name: string): {
-    workspace: string;
-    scope: string;
-    machine: string;
-    timestamp: string;
-  } | null {
-    const match = name.match(
-      /^claude-session-([^-]+)-([^-]+)-([^-]+)-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})\.tar\.gz$/,
-    );
-    if (!match) return null;
-    return {
-      workspace: match[1]!,
-      scope: match[2]!,
-      machine: match[3]!,
-      timestamp: match[4]!,
-    };
+  private async ensureEncryptionKeys(ctx: ProviderContext, need: 'public' | 'private'): Promise<string | null> {
+    const envKey = need === 'public' ? 'ENVBEAM_AGE_PUBLIC_KEY' : 'ENVBEAM_AGE_PRIVATE_KEY';
+    if (process.env[envKey]) return null;
+    const encryptionConfig = await getGlobalEncryptionConfig(ctx.runner);
+    if (!encryptionConfig) {
+      return 'no encryption keys found — run `envbeam session setup` to generate them.';
+    }
+    injectEncryptionEnv(encryptionConfig);
+    return null;
   }
 
   async push(ctx: ProviderContext): Promise<SessionResult> {
@@ -99,29 +178,15 @@ export class ClaudeNativeProvider implements SessionProvider {
     const workspace = ctx.config.workspace;
     const machine = machineName();
 
-    // Determine source path based on scope
-    let sourcePath: string;
-    switch (scope) {
-      case 'project':
-        sourcePath = this.getProjectSessionPath(ctx.workspaceRoot);
-        break;
-      case 'workspace':
-        sourcePath = this.getWorkspaceClaudePath(ctx.workspaceRoot);
-        break;
-      case 'global':
-        sourcePath = this.getClaudeHome();
-        break;
-      default:
-        return { action: 'noop', detail: `unknown scope: ${scope}` };
+    const source = await this.resolveSessionPath(scope, ctx.workspaceRoot);
+    if (!source.exists) {
+      const { dirs } = await this.candidateConfigDirs();
+      return { action: 'noop', detail: `no Claude ${scope} data found (looked in ${dirs.join(', ')})` };
     }
-
-    // Check if source exists
-    if (!(await pathExists(sourcePath))) {
-      return { action: 'noop', detail: `no Claude data at ${sourcePath}` };
-    }
+    ctx.logger.sub(pc.dim(`using Claude config ${source.configDir}`));
 
     if (ctx.dryRun) {
-      return { action: 'noop', detail: `would push ${scope} session from ${sourcePath}` };
+      return { action: 'noop', detail: `would push ${scope} session from ${source.dir}` };
     }
 
     const target = await this.getSyncTarget(ctx);
@@ -135,7 +200,7 @@ export class ClaudeNativeProvider implements SessionProvider {
     await ensureDir(tempDir);
     const archivePath = path.join(tempDir, archiveName);
 
-    // Create metadata file with path mapping
+    // Metadata records the source path so restore can translate paths.
     const metadataPath = path.join(tempDir, 'envbeam-session-meta.json');
     const metadata = {
       workspace,
@@ -150,59 +215,45 @@ export class ClaudeNativeProvider implements SessionProvider {
     };
     await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2));
 
-    // Create tarball with session data + metadata
     const tarRes = await ctx.runner.run(
       'tar',
-      ['-czf', archivePath, '-C', path.dirname(sourcePath), path.basename(sourcePath)],
+      ['-czf', archivePath, '-C', path.dirname(source.dir), path.basename(source.dir)],
       { cwd: ctx.workspaceRoot, allowFailure: true },
     );
-
     if (tarRes.code !== 0) {
       return { action: 'noop', detail: `tar failed: ${tarRes.stderr}` };
     }
-
-    // Get sync config - encryption is mandatory for session data
-    const syncConfig: SyncConfig | undefined =
-      ctx.config.session?.sync ?? ctx.config.database?.sync;
-
-    if (!syncConfig) {
-      return { action: 'noop', detail: 'no sync target configured' };
+    try {
+      const st = await fs.stat(archivePath);
+      ctx.logger.sub(pc.dim(`session archive ${(st.size / 1024 / 1024).toFixed(1)} MB`));
+    } catch {
+      /* size is informational */
     }
 
-    // Fetch encryption keys from Doppler if not in environment
-    if (!process.env.ENVBEAM_AGE_PUBLIC_KEY) {
-      const encryptionConfig = await getGlobalEncryptionConfig(ctx.runner);
-      if (!encryptionConfig) {
-        return {
-          action: 'noop',
-          detail: 'no encryption keys found. Run `envbeam storage setup` first.',
-        };
-      }
-      injectEncryptionEnv(encryptionConfig);
-    }
+    const syncConfig: SyncConfig | undefined = ctx.config.session?.sync ?? ctx.config.database?.sync;
+    if (!syncConfig) return { action: 'noop', detail: 'no sync target configured' };
+
+    const keyErr = await this.ensureEncryptionKeys(ctx, 'public');
+    if (keyErr) return { action: 'noop', detail: keyErr };
 
     // Always encrypt session archives with age
     const encryptedConfig: SyncConfig = { ...syncConfig, encrypt: 'age' };
-    const suffix = '.age';
-    const uploadPath = archivePath + suffix;
-    const uploadName = archiveName + suffix;
+    const uploadPath = archivePath + '.age';
+    const uploadName = archiveName + '.age';
     await encryptFile(ctx, encryptedConfig, archivePath, uploadPath);
     ctx.logger.sub('session encrypted');
 
-    // Upload metadata separately (not encrypted - contains no sensitive data)
+    // Upload metadata separately (not encrypted — contains no sensitive data)
     const metaArchiveName = archiveName.replace('.tar.gz', '.meta.json');
-
     try {
       await target.put(ctx, uploadPath, uploadName);
       await target.put(ctx, metadataPath, metaArchiveName);
 
-      // Cleanup local files
       await fs.rm(archivePath, { force: true });
-      if (suffix) await fs.rm(uploadPath, { force: true });
+      await fs.rm(uploadPath, { force: true });
       await fs.rm(metadataPath, { force: true });
 
-      const encNote = suffix ? ` (encrypted with ${syncConfig!.encrypt})` : '';
-      return { action: 'pushed', detail: `${scope} session pushed${encNote}` };
+      return { action: 'pushed', detail: `${scope} session pushed (encrypted with age)` };
     } catch (e) {
       return { action: 'noop', detail: `upload failed: ${(e as Error).message}` };
     }
@@ -218,142 +269,98 @@ export class ClaudeNativeProvider implements SessionProvider {
     }
 
     const target = await this.getSyncTarget(ctx);
-    if (!target) {
-      return { action: 'noop', detail: 'no sync target configured' };
-    }
+    if (!target) return { action: 'noop', detail: 'no sync target configured' };
 
-    // List available sessions for this workspace
+    // Choose the newest encrypted archive for this workspace + scope,
+    // preferring one pushed from a different machine.
     const entries = await target.list(ctx, `claude-session-${workspace}`);
-    if (!entries.length) {
+    const candidates = entries
+      .filter((e) => e.name.endsWith('.tar.gz.age'))
+      .map((e) => ({ name: e.name, parsed: parseSessionFileName(e.name.replace(/\.age$/, '')) }))
+      .filter((c): c is { name: string; parsed: ParsedSessionName } => c.parsed != null && c.parsed.scope === scope)
+      .sort((a, b) => b.parsed.timestamp.localeCompare(a.parsed.timestamp));
+    if (!candidates.length) {
       return { action: 'noop', detail: 'no session backups found' };
     }
+    const chosen = candidates.find((c) => c.parsed.machine !== machine) ?? candidates[0]!;
 
-    // Find the most recent session (not from this machine if possible)
-    const otherMachine = entries.find((e) => {
-      const parsed = this.parseSessionFileName(e.name);
-      return parsed && parsed.machine !== machine && parsed.scope === scope;
-    });
-    const latest = otherMachine ?? entries[0];
-    if (!latest) {
-      return { action: 'noop', detail: 'no matching session found' };
-    }
+    const syncConfig: SyncConfig | undefined = ctx.config.session?.sync ?? ctx.config.database?.sync;
+    if (!syncConfig) return { action: 'noop', detail: 'no sync target configured' };
 
-    const parsed = this.parseSessionFileName(latest.name);
-    if (!parsed) {
-      return { action: 'noop', detail: 'invalid session filename' };
-    }
+    const keyErr = await this.ensureEncryptionKeys(ctx, 'private');
+    if (keyErr) return { action: 'noop', detail: keyErr };
 
-    // Download archive
     const tempDir = path.join(os.tmpdir(), 'envbeam-session');
     await ensureDir(tempDir);
-
-    // Get sync config - encryption is mandatory
-    const syncConfig: SyncConfig | undefined =
-      ctx.config.session?.sync ?? ctx.config.database?.sync;
-
-    if (!syncConfig) {
-      return { action: 'noop', detail: 'no sync target configured' };
-    }
-
-    // Fetch encryption keys from Doppler if not in environment
-    if (!process.env.ENVBEAM_AGE_PRIVATE_KEY) {
-      const encryptionConfig = await getGlobalEncryptionConfig(ctx.runner);
-      if (!encryptionConfig) {
-        return {
-          action: 'noop',
-          detail: 'no encryption keys found. Run `envbeam storage setup` first.',
-        };
-      }
-      injectEncryptionEnv(encryptionConfig);
-    }
-
-    // Session files are always encrypted with age
-    const ageEntry = entries.find((e) => e.name.endsWith('.age'));
-    if (!ageEntry) {
-      return { action: 'noop', detail: 'no encrypted session archive found' };
-    }
-
-    const downloadName = ageEntry.name;
-    const downloadPath = path.join(tempDir, downloadName);
-    const archiveName = downloadName.replace(/\.age$/, '');
-    const archivePath = path.join(tempDir, archiveName);
-    const metaPath = path.join(tempDir, archiveName.replace('.tar.gz', '.meta.json'));
+    const downloadPath = path.join(tempDir, chosen.name);
+    const archiveBase = chosen.name.replace(/\.age$/, '');
+    const archivePath = path.join(tempDir, archiveBase);
+    const metaPath = path.join(tempDir, archiveBase.replace('.tar.gz', '.meta.json'));
 
     try {
-      await target.get(ctx, downloadName, downloadPath);
+      await target.get(ctx, chosen.name, downloadPath);
     } catch (e) {
       return { action: 'noop', detail: `download failed: ${(e as Error).message}` };
     }
 
-    // Always decrypt session archives
     const decryptConfig: SyncConfig = { ...syncConfig, encrypt: 'age' };
     await decryptFile(ctx, decryptConfig, downloadPath, archivePath);
     await fs.rm(downloadPath, { force: true });
     ctx.logger.sub('session decrypted');
 
-    // Try to get metadata
-    let metadata: { workspaceRoot?: string; remotePaths?: Record<string, string> } = {};
+    // Metadata (optional): records the source machine's workspace path.
+    let metadata: { workspaceRoot?: string } = {};
     try {
-      await target.get(ctx, latest.name.replace('.tar.gz', '.meta.json'), metaPath);
+      await target.get(ctx, archiveBase.replace('.tar.gz', '.meta.json'), metaPath);
       metadata = JSON.parse(await fs.readFile(metaPath, 'utf8'));
     } catch {
-      // Metadata optional
+      /* metadata optional */
     }
 
-    // Determine destination path
-    let destPath: string;
-    switch (scope) {
-      case 'project':
-        destPath = this.getProjectSessionPath(ctx.workspaceRoot);
-        break;
-      case 'workspace':
-        destPath = this.getWorkspaceClaudePath(ctx.workspaceRoot);
-        break;
-      case 'global':
-        destPath = this.getClaudeHome();
-        break;
-      default:
-        return { action: 'noop', detail: `unknown scope: ${scope}` };
-    }
+    // Where should the sessions live on THIS machine? (This differs from the
+    // source machine's dir name whenever the workspace path differs, so we
+    // extract to a temp dir and copy into the locally-resolved destination.)
+    const dest = await this.resolveSessionPath(scope, ctx.workspaceRoot);
+    ctx.logger.sub(pc.dim(`restoring into ${dest.dir}`));
 
-    await ensureDir(destPath);
-
-    // Extract archive
-    const extractRes = await ctx.runner.run(
-      'tar',
-      ['-xzf', archivePath, '-C', path.dirname(destPath)],
-      { cwd: ctx.workspaceRoot, allowFailure: true },
-    );
-
+    const extractDir = path.join(tempDir, `extract-${process.pid}-${Math.floor(Math.random() * 1e6)}`);
+    await ensureDir(extractDir);
+    const extractRes = await ctx.runner.run('tar', ['-xzf', archivePath, '-C', extractDir], {
+      cwd: ctx.workspaceRoot,
+      allowFailure: true,
+    });
     if (extractRes.code !== 0) {
       return { action: 'noop', detail: `extract failed: ${extractRes.stderr}` };
     }
 
-    // Path translation for project sessions
+    // The archive contains a single top-level dir named after the SOURCE
+    // machine's sanitized path — merge its contents into the local dest.
+    const [extractedName] = await fs.readdir(extractDir);
+    if (!extractedName) {
+      return { action: 'noop', detail: 'archive was empty' };
+    }
+    await ensureDir(path.dirname(dest.dir));
+    await fs.cp(path.join(extractDir, extractedName), dest.dir, { recursive: true, force: true });
+
+    // Translate absolute paths inside session files to this machine's layout.
     if (scope === 'project' && metadata.workspaceRoot && metadata.workspaceRoot !== ctx.workspaceRoot) {
-      await this.translatePaths(destPath, metadata.workspaceRoot, ctx.workspaceRoot);
+      await this.translatePaths(dest.dir, metadata.workspaceRoot, ctx.workspaceRoot);
     }
 
-    // Cleanup
     await fs.rm(archivePath, { force: true });
     await fs.rm(metaPath, { force: true }).catch(() => {});
+    await fs.rm(extractDir, { recursive: true, force: true }).catch(() => {});
 
     return {
       action: 'pulled',
-      detail: `${scope} session restored from ${parsed.machine} (${parsed.timestamp})`,
+      detail: `${scope} session restored from ${chosen.parsed.machine} (${chosen.parsed.timestamp}) → ${dest.dir}`,
     };
   }
 
   /**
    * Translate file paths in session files from source machine path to local path.
    */
-  private async translatePaths(
-    sessionDir: string,
-    sourcePath: string,
-    destPath: string,
-  ): Promise<void> {
-    // Claude session files may contain absolute paths
-    // Walk through JSON files and replace paths
+  private async translatePaths(sessionDir: string, sourcePath: string, destPath: string): Promise<void> {
     const files = await this.walkJsonFiles(sessionDir);
     for (const file of files) {
       try {
@@ -392,29 +399,12 @@ export class ClaudeNativeProvider implements SessionProvider {
 
   async status(ctx: ProviderContext): Promise<SessionStatus> {
     const scope = ctx.config.session?.scope ?? 'project';
-    let sourcePath: string;
-
-    switch (scope) {
-      case 'project':
-        sourcePath = this.getProjectSessionPath(ctx.workspaceRoot);
-        break;
-      case 'workspace':
-        sourcePath = this.getWorkspaceClaudePath(ctx.workspaceRoot);
-        break;
-      case 'global':
-        sourcePath = this.getClaudeHome();
-        break;
-      default:
-        return { available: false, detail: `unknown scope: ${scope}` };
-    }
-
-    const exists = await pathExists(sourcePath);
+    const source = await this.resolveSessionPath(scope, ctx.workspaceRoot);
     const target = await this.getSyncTarget(ctx);
-
     return {
       available: true,
-      detail: exists
-        ? `Claude ${scope} data exists at ${sourcePath}`
+      detail: source.exists
+        ? `Claude ${scope} data exists at ${source.dir}`
         : `no Claude ${scope} data yet`,
       syncConfigured: target != null,
     };

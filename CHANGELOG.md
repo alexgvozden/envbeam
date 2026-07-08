@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-07-08
+
+### Fixed
+- **Claude session sync never found any sessions** — three bugs made the Session step a permanent no-op:
+  1. the project-dir name stripped Claude Code's **leading dash** (`projects/Users-…` instead of `projects/-Users-…`), so the session folder was never found even in `~/.claude`;
+  2. only `~/.claude` was searched — users running Claude with an aliased `CLAUDE_CONFIG_DIR` (e.g. `~/.claude-personal`) were invisible;
+  3. the archive-name parser assumed dash-free workspace/machine names, so restore failed for names like `synthetic-signals`.
+
+### Added
+- **Claude config-dir discovery** — honors `CLAUDE_CONFIG_DIR`/`CLAUDE_HOME`, otherwise scans every `~/.claude*` dir and picks the one with the most recent session activity for the project (logged: `using Claude config ~/.claude-personal`). Restore resolves the destination on the **target** machine the same way, extracts to a temp dir, merges into the locally-correct project dir (source and target sanitized names differ when paths differ), and translates absolute paths inside the session files. Push logs the archive size; pull prefers the newest archive from a *different* machine and logs where it restored to.
+
 ## [0.12.0] - 2026-07-08
 
 ### Added
