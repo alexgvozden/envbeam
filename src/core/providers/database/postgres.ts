@@ -7,8 +7,8 @@ import type {
   SnapshotOptions,
   ToolRequirement,
 } from '../types.js';
-import { SqlDatabaseProvider } from './base.js';
-import { resolveConnection, type DbConnectionParts } from './connection.js';
+import { SqlDatabaseProvider, firstInt, type DbOverview } from './base.js';
+import { resolveConnection, describeConnection, type DbConnectionParts } from './connection.js';
 
 const PART_KEYS = {
   host: ['PGHOST', 'POSTGRES_HOST', 'DB_HOST'],
@@ -73,8 +73,25 @@ export class PostgresProvider extends SqlDatabaseProvider {
     return res.code === 0;
   }
 
+  connectionSummary(ctx: ProviderContext): string {
+    return describeConnection(conn(ctx).parts);
+  }
+
   protected changeProbeSql(table: string): string {
     return `SELECT count(*) FROM ${quoteIdent(table)}`;
+  }
+
+  protected async databaseOverview(ctx: ProviderContext): Promise<DbOverview | null> {
+    try {
+      const size = await this.runSql(ctx, 'SELECT pg_database_size(current_database())');
+      const rows = await this.runSql(
+        ctx,
+        'SELECT COALESCE(sum(n_live_tup), 0)::bigint FROM pg_stat_user_tables',
+      );
+      return { sizeBytes: firstInt(size), rows: firstInt(rows) };
+    } catch {
+      return null;
+    }
   }
 
   protected dumpExtension(opts: SnapshotOptions): string {

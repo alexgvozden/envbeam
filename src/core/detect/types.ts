@@ -26,3 +26,14 @@ export function detectedValue(report: DetectionReport, field: string): string | 
   if (f && f.status === 'detected' && typeof f.value === 'string') return f.value;
   return undefined;
 }
+
+/**
+ * Resolve the concrete git branch to record/restore. The config's `branch`
+ * defaults to the sentinel `current` ("follow the checked-out branch"), which
+ * isn't a real ref — so resolve it to the actually detected branch. An explicit
+ * branch in the config wins; falls back to `main` if nothing is detected.
+ */
+export function resolveBranch(report: DetectionReport, configBranch?: string): string {
+  if (configBranch && configBranch !== 'current') return configBranch;
+  return detectedValue(report, 'git.branch') ?? 'main';
+}

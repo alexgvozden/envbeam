@@ -16,6 +16,31 @@ import type {
   RestoreResult,
 } from '../types.js';
 
+/** Whole-database change signal: on-disk size (bytes) + approximate row count. */
+export interface DbOverview {
+  sizeBytes: number;
+  rows: number;
+}
+
+/** Parse the first integer out of a CLI query result (tolerant of whitespace). */
+export function firstInt(out: string): number {
+  const n = parseInt(out.trim().split(/\s+/)[0] ?? '', 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Human-readable byte size, e.g. 12.3 MB. */
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(1)} ${units[i]}`;
+}
+
 /** Working directory for in-flight dump/restore files (cleaned by retention). */
 export async function snapshotWorkDir(): Promise<string> {
   const dir = path.join(stateDir(), 'snapshots');
@@ -44,6 +69,12 @@ export abstract class SqlDatabaseProvider implements DatabaseProvider {
   protected abstract dumpExtension(opts: SnapshotOptions): string;
   /** SQL to read a single table's count + optional updated_at marker. */
   protected abstract changeProbeSql(table: string): string;
+  /**
+   * Whole-database change signal: on-disk size + approximate total row count.
+   * Used so change-detection works out of the box without configured tables.
+   * Return null if the engine can't compute it.
+   */
+  protected abstract databaseOverview(ctx: ProviderContext): Promise<DbOverview | null>;
 
   /** Tables to watch for change detection. Wildcards aren't concrete tables. */
   protected changeTables(ctx: ProviderContext): string[] {
@@ -56,14 +87,23 @@ export abstract class SqlDatabaseProvider implements DatabaseProvider {
   }
 
   async hasChanged(ctx: ProviderContext, sinceFingerprint?: string): Promise<DbChangeResult> {
-    const tables = this.changeTables(ctx);
-    if (tables.length === 0) {
-      return { changed: false, detail: 'no change-detection tables configured' };
-    }
     if (!(await this.ping(ctx))) {
-      return { changed: false, detail: 'database not reachable' };
+      return { changed: false, detail: 'database not reachable (is it up, and are the client tools installed?)' };
     }
     const parts: string[] = [];
+
+    // Whole-DB signal (size + approx rows) — always, so detection works even
+    // with no change-detection tables configured.
+    let overview: DbOverview | null = null;
+    try {
+      overview = await this.databaseOverview(ctx);
+    } catch {
+      overview = null;
+    }
+    if (overview) parts.push(`size:${overview.sizeBytes}`, `rows:${overview.rows}`);
+
+    // Exact per-table counts when the user pinned specific tables.
+    const tables = this.changeTables(ctx);
     for (const t of tables) {
       try {
         const out = await this.runSql(ctx, this.changeProbeSql(t));
@@ -72,17 +112,25 @@ export abstract class SqlDatabaseProvider implements DatabaseProvider {
         parts.push(`${t}:err`);
       }
     }
+
+    if (parts.length === 0) {
+      return { changed: false, detail: 'no readable change signal (no size/row info, no change tables)' };
+    }
+
     const fingerprint = createHash('sha1').update(parts.join('|')).digest('hex');
     const changed = sinceFingerprint != null && sinceFingerprint !== fingerprint;
+    const summary = overview
+      ? `~${formatBytes(overview.sizeBytes)}, ~${overview.rows.toLocaleString('en-US')} row(s)`
+      : `${tables.length} tracked table(s)`;
     return {
       changed: sinceFingerprint == null ? false : changed,
       fingerprint,
       detail:
         sinceFingerprint == null
-          ? 'baseline fingerprint recorded'
+          ? `baseline: ${summary}`
           : changed
-            ? 'tracked tables changed since last snapshot'
-            : 'no change in tracked tables',
+            ? `data changed → ${summary}`
+            : `no data changes (${summary})`,
     };
   }
 

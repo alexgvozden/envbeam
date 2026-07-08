@@ -13,6 +13,10 @@ import {
   snapshotName,
 } from '../sync/index.js';
 import { PreflightError } from '../util/errors.js';
+import { assertSecretsAuth } from './preflight.js';
+import { detectedValue, resolveBranch } from '../detect/types.js';
+import { ensureTools } from '../util/tools.js';
+import { sessionSummary } from './format.js';
 import type { GitPushResult, SnapshotOptions } from '../providers/types.js';
 
 export interface PauseOptions {
@@ -47,6 +51,15 @@ export async function runPause(ctx: RunContext, opts: PauseOptions): Promise<Pau
   }
   const active = resolveActiveProviders(ctx);
   const report: PauseReport = {};
+
+  // Preflight: if two-way secrets sync will push to the provider, make sure we
+  // can authenticate BEFORE touching git — otherwise git pushes and the run
+  // dies at the secrets step, leaving a half-applied checkpoint.
+  const willPushSecrets =
+    !!active.secrets && (ctx.config.secrets?.sync ?? 'pull-only') === 'two-way' && !!active.secrets.push;
+  if (willPushSecrets && !ctx.dryRun) {
+    await assertSecretsAuth(ctx);
+  }
 
   // 1. Git
   log.step('Git');
@@ -97,6 +110,18 @@ export async function runPause(ctx: RunContext, opts: PauseOptions): Promise<Pau
       report.secrets = { action: 'skipped', count: 0, detail: 'pull-only mode' };
       log.sub('not pushed (sync: pull-only — provider is source of truth)');
     }
+
+    // Record git remote + branch into the provider so it alone says what to
+    // clone (visible in Doppler; never materialized into .env). Best-effort.
+    if (active.secrets.recordMeta && !ctx.dryRun) {
+      const gitRemote = detectedValue(ctx.detection, 'git.url');
+      const gitBranch = resolveBranch(ctx.detection, ctx.config.git?.branch);
+      const meta = await active.secrets.recordMeta(ctx.providerCtx('secrets'), {
+        ENVBEAM_GIT_REMOTE: gitRemote ?? '',
+        ENVBEAM_GIT_BRANCH: gitBranch,
+      });
+      if (meta.ok) log.sub(pc.dim(`recorded git remote + branch (${gitBranch}) in ${ctx.config.secrets?.provider}`));
+    }
   }
 
   // 5. Container — optionally stop
@@ -110,6 +135,19 @@ export async function runPause(ctx: RunContext, opts: PauseOptions): Promise<Pau
   // 6. Report
   printPauseReport(ctx, report);
   return report;
+}
+
+/** Whether any snapshot for this workspace already exists on the sync target. */
+async function hasRemoteSnapshot(ctx: RunContext, dctx: ReturnType<RunContext['providerCtx']>): Promise<boolean> {
+  const sync = ctx.config.database?.sync;
+  if (!sync) return false;
+  try {
+    const target = createSyncTarget(sync, ctx.identities.sync);
+    const entries = await target.list(dctx, ctx.config.workspace);
+    return entries.length > 0;
+  } catch {
+    return false; // can't list → assume none; safer to back up than to skip
+  }
 }
 
 async function pauseDatabase(
@@ -132,6 +170,33 @@ async function pauseDatabase(
 
   const dctx = ctx.providerCtx('database');
   let take = opts.snapshot === true;
+  let skipReason = out.migrationsOnly ? 'migrations-only (schema carried by migrations)' : 'no data changes';
+
+  // Snapshotting needs the DB client tools (pg_dump/psql, mysqldump/mysql).
+  // Per project rule, install them for the user rather than telling them to.
+  if (opts.snapshot !== false && (db.mode === 'snapshot' || opts.snapshot === true)) {
+    const missing: string[] = [];
+    for (const req of active.database.requiredTools(dctx)) {
+      if (!(await ctx.runner.which(req.command))) missing.push(req.command);
+    }
+    if (missing.length) {
+      if (ctx.dryRun) {
+        log.sub(pc.yellow(`snapshot needs ${missing.join(', ')} — would offer to install them`));
+        out.skipped = `client tools missing: ${missing.join(', ')}`;
+        return out;
+      }
+      log.sub(`snapshot needs ${missing.join(', ')} — installing`);
+      const res = await ensureTools(missing, ctx.runner, ctx.logger, ctx.prompter);
+      if (!res.allInstalled) {
+        log.sub(pc.yellow(`skipping snapshot — could not install: ${res.missing.join(', ')}`));
+        out.skipped = `client tools unavailable: ${res.missing.join(', ')}`;
+        return out;
+      }
+    }
+    if (active.database.connectionSummary) {
+      log.sub(pc.dim(`connecting to ${active.database.connectionSummary(dctx)}`));
+    }
+  }
 
   if (opts.snapshot === undefined && db.mode === 'snapshot') {
     // change-detection path
@@ -139,24 +204,43 @@ async function pauseDatabase(
     const change = await active.database.hasChanged(dctx, state.dbFingerprint);
     if (change.fingerprint) await patchState(ctx.workspaceRoot, { dbFingerprint: change.fingerprint });
     if (state.dbFingerprint == null) {
-      log.sub('change-detection baseline recorded; no snapshot this run');
+      // First push. If we couldn't read the DB, be honest — no baseline taken.
+      if (!change.fingerprint) {
+        log.sub(pc.yellow(`skipping snapshot — ${change.detail}`));
+        skipReason = change.detail ?? 'database not readable';
+      } else {
+        // If nothing has ever been backed up to the sync target, take an
+        // initial snapshot so the data exists remotely; otherwise the data is
+        // already there (e.g. fresh clone / another machine), so just baseline.
+        const backedUp = await hasRemoteSnapshot(ctx, dctx);
+        if (backedUp) {
+          log.sub(`recorded change-detection baseline (${change.detail})`);
+          log.sub(pc.dim('  future pushes snapshot only when data changes; run `envbeam push --snapshot` to force one'));
+          skipReason = 'baseline recorded (already backed up remotely)';
+        } else {
+          log.sub(`first push, nothing backed up yet — taking an initial snapshot (${change.detail})`);
+          take = !ctx.dryRun;
+          if (ctx.dryRun) skipReason = 'would take initial snapshot';
+        }
+      }
     } else if (change.changed) {
-      log.sub(pc.yellow(change.detail ?? 'tracked tables changed'));
+      log.sub(pc.yellow(change.detail ?? 'tracked tables changed since last push'));
       take = ctx.dryRun
         ? false
         : await ctx.prompter.confirm('Take a DB snapshot to carry the changed data?', true);
+      if (!take) skipReason = 'changes detected but snapshot declined';
     } else {
-      log.sub(change.detail ?? 'no tracked changes');
+      log.sub(change.detail ?? 'no tracked data changes since last push');
     }
   }
 
   if (opts.snapshot === false) {
     log.sub('snapshot skipped (--no-snapshot)');
-    out.skipped = 'forced skip';
+    out.skipped = 'skipped (--no-snapshot)';
     return out;
   }
   if (!take) {
-    out.skipped = out.migrationsOnly ? 'migrations-only' : 'no changes';
+    out.skipped = skipReason;
     return out;
   }
 
@@ -227,18 +311,18 @@ function printPauseReport(ctx: RunContext, report: PauseReport): void {
   if (report.database) {
     lines.push(
       report.database.snapshot
-        ? `database:  snapshot ${report.database.snapshot.timestamp} pushed`
-        : `database:  ${report.database.skipped ?? 'migrations-only'} (no snapshot)`,
+        ? `database:  snapshot ${report.database.snapshot.timestamp} uploaded`
+        : `database:  no snapshot — ${report.database.skipped ?? 'migrations-only'}`,
     );
   }
   if (report.secrets) {
     lines.push(
       report.secrets.action === 'uploaded'
-        ? `secrets:   ${report.secrets.count} secret(s) pushed`
+        ? `secrets:   ${report.secrets.count} pushed to provider`
         : `secrets:   ${report.secrets.detail ?? report.secrets.action}`,
     );
   }
-  if (report.session) lines.push(`session:   ${report.session.action}`);
+  if (report.session) lines.push(`session:   ${sessionSummary(report.session.action)}`);
   if (report.container?.stopped) lines.push('container: stopped');
   for (const l of lines) log.raw('    ' + l);
   log.success(ctx.dryRun ? 'pause dry-run complete' : 'Safe to switch machines.');

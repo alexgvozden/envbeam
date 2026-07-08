@@ -141,6 +141,17 @@ export interface SecretsSetupOptions {
   importEnv?: boolean;
 }
 
+export interface SecretsReadyResult {
+  /** True if the backing project/config exists (or was just created). */
+  ready: boolean;
+  /** True when this call provisioned it. */
+  created?: boolean;
+  /** Reason it's not ready (shown to the user). */
+  detail?: string;
+  /** Remediation hint when we couldn't auto-provision (e.g. non-interactive). */
+  hint?: string;
+}
+
 export interface SecretsProvider extends BaseProvider {
   kind: 'secrets';
   pull(ctx: ProviderContext): Promise<SecretsPullResult>;
@@ -150,6 +161,17 @@ export interface SecretsProvider extends BaseProvider {
   push?(ctx: ProviderContext): Promise<SecretsPushResult>;
   /** Set up the provider (create project, import secrets). Optional — for init flow. */
   setup?(ctx: ProviderContext, opts: SecretsSetupOptions): Promise<SecretsSetupResult>;
+  /**
+   * Verify the backing project/config exists and, on an interactive terminal,
+   * offer to create it. Optional — providers without a project concept omit it.
+   */
+  ensureReady?(ctx: ProviderContext): Promise<SecretsReadyResult>;
+  /**
+   * Record envbeam bookkeeping (e.g. git remote + branch) into the provider so
+   * it alone identifies what to clone. Keys are `ENVBEAM_`-prefixed and never
+   * materialized into the app's `.env`. Best-effort. Optional.
+   */
+  recordMeta?(ctx: ProviderContext, meta: Record<string, string>): Promise<{ ok: boolean; detail?: string }>;
 }
 
 /* ------------------------------- container ------------------------------- */
@@ -210,6 +232,8 @@ export interface DbStatus {
 
 export interface DatabaseProvider extends BaseProvider {
   kind: 'database';
+  /** Human-readable connection target (e.g. `agentlab@localhost:5432/agentlab`). */
+  connectionSummary?(ctx: ProviderContext): string;
   hasChanged(ctx: ProviderContext, sinceFingerprint?: string): Promise<DbChangeResult>;
   snapshot(ctx: ProviderContext, opts: SnapshotOptions): Promise<SnapshotResult>;
   restore(ctx: ProviderContext, snapshotFile: string): Promise<RestoreResult>;

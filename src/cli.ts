@@ -50,10 +50,13 @@ async function main(): Promise<void> {
     .showHelpAfterError();
 
   program
-    .command('init')
-    .description('Scaffold a .envbeam.yaml in the current repo')
+    .command('init [project]')
+    .description('Scaffold a .envbeam.yaml (or bootstrap an existing project by name)')
     .option('--force', 'overwrite an existing config')
-    .action(async (opts, cmd) => exit(await initCommand({ ...globalOpts(cmd), force: opts.force })));
+    .option('--dir <path>', 'directory to clone into (bootstrap mode)')
+    .action(async (project, opts, cmd) =>
+      exit(await initCommand({ ...globalOpts(cmd), force: opts.force, project, dir: opts.dir })),
+    );
 
   program
     .command('pull [project]')

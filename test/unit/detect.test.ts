@@ -4,7 +4,7 @@ import { detectMigrateCommand } from '../../src/core/detect/database.js';
 import { parseEnvKeys } from '../../src/core/detect/secrets.js';
 import { sshHostFromUrl, parseGitConfig } from '../../src/core/detect/git.js';
 import { parseCompose, findComposeFile } from '../../src/core/detect/container.js';
-import { getField, detectedValue } from '../../src/core/detect/types.js';
+import { getField, detectedValue, resolveBranch } from '../../src/core/detect/types.js';
 import { tmpDir, writeFiles } from '../helpers/context.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -33,6 +33,20 @@ describe('git detection', () => {
     });
     const { remotes } = await parseGitConfig(`${dir}/.git`);
     expect(remotes[0]).toEqual({ name: 'origin', url: 'git@github-work:acme/repo.git' });
+  });
+
+  it('resolves the `current` sentinel to the detected branch', async () => {
+    const report = {
+      workspaceRoot: '/x',
+      fields: [{ field: 'git.branch', value: 'wave-1', source: '.git/HEAD', status: 'detected' as const }],
+    };
+    // sentinel / unset → detected branch
+    expect(resolveBranch(report, 'current')).toBe('wave-1');
+    expect(resolveBranch(report, undefined)).toBe('wave-1');
+    // explicit branch in config wins
+    expect(resolveBranch(report, 'release')).toBe('release');
+    // nothing detected → main
+    expect(resolveBranch({ workspaceRoot: '/x', fields: [] }, 'current')).toBe('main');
   });
 
   it('flags an https remote identity as ambiguous', async () => {
@@ -74,6 +88,41 @@ describe('container detection', () => {
     const report = await detectWorkspace(dir);
     expect(detectedValue(report, 'container.mode')).toBe('none');
   });
+
+  it('detects a compose file kept in a subdirectory (monorepo layout)', async () => {
+    const dir = await fixture({
+      'infra/docker-compose.yml': 'services:\n  db:\n    image: postgres:16\n',
+    });
+    const report = await detectWorkspace(dir);
+    expect(detectedValue(report, 'container.mode')).toBe('compose');
+    expect(detectedValue(report, 'container.composeFile')).toBe('infra/docker-compose.yml');
+    // subdir compose still drives database detection
+    expect(detectedValue(report, 'database.provider')).toBe('postgres');
+  });
+
+  it('prefers a root compose file over one in a subdirectory', async () => {
+    const dir = await fixture({
+      'compose.yml': 'services:\n  web:\n    build: .\n',
+      'infra/docker-compose.yml': 'services:\n  db:\n    image: postgres:16\n',
+    });
+    expect(await findComposeFile(dir)).toBe(`${dir}/compose.yml`);
+  });
+
+  it('prefers a dev-oriented subdir (infra) over a deploy/prod one', async () => {
+    const dir = await fixture({
+      'deploy/compose.yml': 'services:\n  db:\n    image: postgres:16\n',
+      'infra/docker-compose.yml': 'services:\n  db:\n    image: postgres:16\n',
+    });
+    expect(await findComposeFile(dir)).toBe(`${dir}/infra/docker-compose.yml`);
+  });
+
+  it('does not descend into ignored directories', async () => {
+    const dir = await fixture({
+      'node_modules/pkg/docker-compose.yml': 'services:\n  db:\n    image: postgres:16\n',
+      'readme.md': '# x',
+    });
+    expect(await findComposeFile(dir)).toBeNull();
+  });
 });
 
 describe('database detection', () => {
@@ -106,6 +155,13 @@ describe('database detection', () => {
     expect((await detectMigrateCommand(await fixture({ 'manage.py': 'x' })))?.command).toMatch(/manage\.py migrate/);
     expect((await detectMigrateCommand(await fixture({ 'app.csproj': '<Project><PackageReference Include="Microsoft.EntityFrameworkCore"/></Project>' })))?.command).toMatch(/dotnet ef/);
     expect(await detectMigrateCommand(await fixture({ 'readme.md': 'x' }))).toBeNull();
+  });
+
+  it('detects Alembic migrations (root and nested)', async () => {
+    const root = await detectMigrateCommand(await fixture({ 'alembic.ini': '[alembic]\n' }));
+    expect(root?.command).toBe('alembic upgrade head');
+    const nested = await detectMigrateCommand(await fixture({ 'apps/api/alembic.ini': '[alembic]\n' }));
+    expect(nested?.command).toBe('alembic -c apps/api/alembic.ini upgrade head');
   });
 
   it('reads migrate from package.json scripts and deps', async () => {

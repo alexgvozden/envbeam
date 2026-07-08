@@ -5,7 +5,7 @@ import { runPause, type PauseOptions } from '../core/pipeline/pause.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
 import { isStorageConfigured, createRegistryStore, type ProjectEntry } from '../core/registry/index.js';
 import { getMachineId } from '../core/util/machine.js';
-import { detectedValue } from '../core/detect/types.js';
+import { detectedValue, resolveBranch } from '../core/detect/types.js';
 import type { Logger } from '../core/util/logger.js';
 import type { Prompter } from '../core/util/prompt.js';
 
@@ -189,8 +189,8 @@ export async function pushCommand(opts: PushCliOptions): Promise<number> {
 
         const entry: ProjectEntry = {
           name: ctx.config.workspace,
-          gitRemote: detectedValue(ctx.detection, 'git.remoteUrl') ?? '',
-          gitBranch: ctx.config.git?.branch ?? 'main',
+          gitRemote: detectedValue(ctx.detection, 'git.url') ?? '',
+          gitBranch: resolveBranch(ctx.detection, ctx.config.git?.branch),
           configSnapshot: configContent,
           lastPush: new Date().toISOString(),
           machineId,

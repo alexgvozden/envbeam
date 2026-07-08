@@ -14,10 +14,17 @@ const URL_KEYS_BY_ENGINE: Record<'postgres' | 'mysql', string[]> = {
   mysql: ['DATABASE_URL', 'MYSQL_URL', 'DB_URL'],
 };
 
+// Accept SQLAlchemy / driver-qualified schemes too, e.g. postgresql+psycopg://,
+// postgresql+asyncpg://, mysql+pymysql://.
 const SCHEME_BY_ENGINE: Record<'postgres' | 'mysql', RegExp> = {
-  postgres: /^postgres(ql)?:\/\//i,
-  mysql: /^mysql:\/\//i,
+  postgres: /^postgres(ql)?(\+[a-z0-9_]+)?:\/\//i,
+  mysql: /^mysql(\+[a-z0-9_]+)?:\/\//i,
 };
+
+/** Strip a `+driver` qualifier so CLI clients (psql/mysql) accept the URL. */
+function normalizeScheme(url: string): string {
+  return url.trim().replace(/^([a-z][a-z0-9.-]*)\+[a-z0-9_]+:\/\//i, '$1://');
+}
 
 // scheme://[user[:password]@]host[:port][/database][?query]
 // Hand-rolled because Node's WHATWG `new URL()` rejects postgres://mysql:// URLs
@@ -34,13 +41,14 @@ function safeDecode(s: string | undefined): string | undefined {
   }
 }
 
-/** Parse a DB connection URL into parts (robust to dotted hosts). */
+/** Parse a DB connection URL into parts (robust to dotted hosts + `+driver`). */
 export function parseDbUrl(url: string): DbConnectionParts {
-  const m = DB_URL_RE.exec(url.trim());
-  if (!m) return { url };
+  const normalized = normalizeScheme(url);
+  const m = DB_URL_RE.exec(normalized);
+  if (!m) return { url: normalized };
   const [, user, password, host, port, database] = m;
   return {
-    url,
+    url: normalized,
     host: host || undefined,
     port: port || undefined,
     user: safeDecode(user) || undefined,
@@ -74,8 +82,16 @@ export function resolveConnection(
     if (fromVar) return parseDbUrl(fromVar);
   }
 
-  // 1) explicit URL var
-  for (const key of URL_KEYS_BY_ENGINE[engine]) {
+  // 1) explicit URL var — known names first, then any other env var whose value
+  //    looks like a connection URL for this engine (catches app-prefixed vars
+  //    like AGENTLAB_DATABASE_URL). Prefer *_URL / *_DSN names when scanning.
+  const scanOrder = [
+    ...URL_KEYS_BY_ENGINE[engine],
+    ...Object.keys(env)
+      .filter((k) => !URL_KEYS_BY_ENGINE[engine].includes(k))
+      .sort((a, b) => Number(/_(URL|DSN)$/i.test(b)) - Number(/_(URL|DSN)$/i.test(a))),
+  ];
+  for (const key of scanOrder) {
     const val = env[key];
     if (val && SCHEME_BY_ENGINE[engine].test(val)) return parseDbUrl(val);
   }

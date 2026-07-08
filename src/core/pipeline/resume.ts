@@ -3,11 +3,13 @@ import { promises as fs } from 'node:fs';
 import pc from 'picocolors';
 import type { RunContext } from './context.js';
 import { resolveActiveProviders } from './providers.js';
-import { runPreflight, type ToolCheck } from './preflight.js';
+import { runPreflight, assertSecretsAuth, type ToolCheck } from './preflight.js';
 import { runMigrateCommand } from '../providers/database/migrate.js';
 import { loadState, patchState } from '../state.js';
 import { createSyncTarget, encryptionSuffix, decryptFile, type SnapshotEntry } from '../sync/index.js';
 import { PreflightError } from '../util/errors.js';
+import { ensureTools } from '../util/tools.js';
+import { sessionSummary } from './format.js';
 import type { GitPullResult, MaterializeResult, ContainerStatus } from '../providers/types.js';
 
 export interface ResumeReport {
@@ -50,6 +52,24 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
       'Define them with `envbeam identity add <name>` or fix the names in .envbeam.yaml.',
     );
   }
+  // Resume pulls secrets from the provider, so gate on auth up front with the
+  // same friendly login hint push uses (shared helper). Skipped in dry-run.
+  if (!ctx.dryRun) await assertSecretsAuth(ctx);
+
+  // Per project rule, install missing DB client tools for the user (snapshot
+  // restore needs them) rather than letting preflight hard-block.
+  if (!ctx.dryRun && ctx.config.database?.mode === 'snapshot' && active.database) {
+    const dctx = ctx.providerCtx('database');
+    const missing: string[] = [];
+    for (const req of active.database.requiredTools(dctx)) {
+      if (!(await ctx.runner.which(req.command))) missing.push(req.command);
+    }
+    if (missing.length) {
+      log.sub(`database tools needed — installing ${missing.join(', ')}`);
+      await ensureTools(missing, ctx.runner, ctx.logger, ctx.prompter);
+    }
+  }
+
   const pre = await runPreflight(ctx, { auth: true });
   const blockers = blockingProblems(ctx, pre.checks);
   for (const c of pre.checks) {
@@ -85,7 +105,10 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
       Object.assign(ctx.env, pulled.values);
       const materialized = await active.secrets.materialize(sctx, pulled);
       report.secrets = { count: pulled.count, materialized };
-      log.sub(`${pulled.count} secret(s) loaded${materialized ? ` → ${materialized.path}` : ''}`);
+      log.sub(
+        `pulled ${pulled.count} secret(s) from ${ctx.config.secrets?.provider}` +
+          (materialized?.path ? ` → wrote ${materialized.path}` : ''),
+      );
     }
   }
 
@@ -234,15 +257,15 @@ function printResumeReport(ctx: RunContext, report: ResumeReport): void {
   const lines: string[] = [];
   if (report.identity) lines.push(`identity:  ${report.identity}`);
   if (report.git) lines.push(`branch:    ${report.git.branch} (${report.git.action})`);
-  if (report.secrets) lines.push(`secrets:   ${report.secrets.count} loaded`);
+  if (report.secrets) lines.push(`secrets:   ${report.secrets.count} written to ${report.secrets.materialized?.path ?? '.env'}`);
   if (report.container) lines.push(`container: ${report.container.running ? 'up' : 'not running'}`);
   if (report.database) {
     const r = report.database.restored
-      ? `restored ${report.database.restored.timestamp}, `
+      ? `restored snapshot ${report.database.restored.timestamp}, `
       : '';
-    lines.push(`database:  ${r}migrations ${report.database.migrated ? 'applied' : 'skipped'}`);
+    lines.push(`database:  ${r}migrations ${report.database.migrated ? 'applied' : 'up to date'}`);
   }
-  if (report.session) lines.push(`session:   ${report.session.action}`);
+  if (report.session) lines.push(`session:   ${sessionSummary(report.session.action)}`);
   for (const l of lines) log.raw('    ' + l);
   log.success(ctx.dryRun ? 'resume dry-run complete' : 'Ready to work.');
   if (!ctx.dryRun) log.hint('Start coding — env, container, and session are in place.');

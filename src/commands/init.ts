@@ -5,15 +5,27 @@ import pc from 'picocolors';
 import { WORKSPACE_CONFIG_NAME } from '../core/config/paths.js';
 import { pathExists } from '../core/util/fs.js';
 import { detectWorkspace } from '../core/detect/index.js';
-import { detectedValue, getField } from '../core/detect/types.js';
+import { detectedValue, getField, resolveBranch } from '../core/detect/types.js';
 import { parseConfig } from '../core/config/load.js';
 import { loadGlobalConfig } from '../core/config/globalConfig.js';
-import { RealCommandRunner } from '../core/util/exec.js';
-import { RegistryStore, saveStorageConfig, type ProjectEntry } from '../core/registry/index.js';
+import { RealCommandRunner, type CommandRunner } from '../core/util/exec.js';
+import {
+  RegistryStore,
+  saveStorageConfig,
+  isStorageConfigured,
+  createRegistryStore,
+  type ProjectEntry,
+} from '../core/registry/index.js';
+import { checkSecretsAuth, loginHint, isInteractive } from '../core/providers/secretsAuth.js';
+import { pullCommand } from './pull.js';
 import { ensureTools } from '../core/util/tools.js';
 import { getMachineId } from '../core/util/machine.js';
 import type { GlobalStorageConfig } from '../core/config/schema.js';
-import { readExistingDopplerStorage } from './storage.js';
+import {
+  readExistingDopplerStorage,
+  s3ConfigFromCredentials,
+  applyS3CredentialsToEnv,
+} from './storage.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
 
 /**
@@ -78,17 +90,50 @@ async function detectGitIdentity(gitUrl: string | undefined): Promise<string | u
 
 export interface InitOptions extends GlobalCliOptions {
   force?: boolean;
+  /** Bootstrap an existing project by name instead of scaffolding a new one. */
+  project?: string;
+  /** Directory to clone into (bootstrap mode). */
+  dir?: string;
+  /** Injectable command runner (tests pass a fake to avoid real network I/O). */
+  runner?: CommandRunner;
 }
 
 export async function initCommand(opts: InitOptions): Promise<number> {
   const logger = makeLogger(opts);
   const prompter = makePrompter(opts);
+  const runner = opts.runner ?? new RealCommandRunner();
+
+  // `envbeam init <name>` for a project that already exists remotely →
+  // reuse the pull bootstrap (clone, write config from snapshot, sync).
+  if (opts.project) {
+    if (await isStorageConfigured()) {
+      const existing = await createRegistryStore(runner)
+        .then((store) => store.getProject(opts.project!))
+        .catch(() => undefined);
+      if (existing) {
+        logger.info(`Project "${opts.project}" exists remotely — bootstrapping via pull…`);
+        return pullCommand({
+          dryRun: opts.dryRun,
+          yes: opts.yes,
+          verbose: opts.verbose,
+          quiet: opts.quiet,
+          project: opts.project,
+          dir: opts.dir,
+        });
+      }
+    }
+    // Not registered yet: fall through and scaffold a new project with this name.
+  }
+
   return runCommand(logger, async () => {
     const cwd = process.cwd();
     const configPath = path.join(cwd, WORKSPACE_CONFIG_NAME);
     if ((await pathExists(configPath)) && !opts.force) {
-      logger.warn(`${WORKSPACE_CONFIG_NAME} already exists. Use --force to overwrite.`);
-      return 1;
+      // Idempotent: init was already run here. Point to the next steps rather
+      // than erroring — Doppler/registry remain the source of truth.
+      logger.success(`Already initialized — ${WORKSPACE_CONFIG_NAME} is present.`);
+      logger.hint('Run `envbeam doctor` to review, `envbeam push`/`pull` to sync. Use --force to re-scaffold.');
+      return 0;
     }
 
     const detection = await detectWorkspace(cwd);
@@ -109,7 +154,7 @@ export async function initCommand(opts: InitOptions): Promise<number> {
       logger.sub(pc.dim(`detected git identity: ${detectedGitIdentity}`));
     }
 
-    const workspace = await prompter.input('Workspace name', path.basename(cwd));
+    const workspace = await prompter.input('Workspace name', opts.project ?? path.basename(cwd));
     const gitIdentity = detectedGitIdentity ?? '';
     const secretsProvider = await prompter.select(
       'Secrets provider',
@@ -120,6 +165,30 @@ export async function initCommand(opts: InitOptions): Promise<number> {
       ],
       'doppler',
     );
+
+    // The provider is the source of truth for secrets, so sign in on the spot
+    // (offers `doppler login` / `op signin`) rather than warning and letting a
+    // later `push`/`resume` fail. Interactive setup only — in `--yes`/non-TTY/CI
+    // runs we just scaffold the config and never shell out to the provider.
+    if (secretsProvider !== 'none' && isInteractive()) {
+      const auth = await checkSecretsAuth(secretsProvider, {
+        runner,
+        logger,
+        prompter,
+        workspaceRoot: cwd,
+        project: secretsProvider === 'doppler' ? workspace : undefined,
+        config: 'dev',
+      });
+      if (auth && !auth.installed) {
+        logger.warn(`${auth.tool} CLI not found — install it to use ${secretsProvider}.`);
+        logger.hint(auth.installHint);
+      } else if (auth && auth.authenticated) {
+        logger.sub(pc.dim(`${secretsProvider} signed in`));
+      } else if (auth) {
+        // Declined the login prompt — config still scaffolds; they can sign in later.
+        logger.hint(loginHint(secretsProvider));
+      }
+    }
 
     // Ask about secrets sync mode
     let secretsSync: 'pull-only' | 'two-way' = 'pull-only';
@@ -181,7 +250,6 @@ export async function initCommand(opts: InitOptions): Promise<number> {
     // ENVBEAM_S3_* settings there, offer to import them instead of making them
     // re-run `envbeam storage setup` from scratch.
     if (!storageConfig && secretsProvider === 'doppler') {
-      const runner = new RealCommandRunner();
       const existing = await readExistingDopplerStorage(runner).catch(() => null);
       if (existing) {
         logger.raw('');
@@ -190,19 +258,9 @@ export async function initCommand(opts: InitOptions): Promise<number> {
         if (useExisting) {
           const aws = await ensureTools(['aws'], runner, logger, prompter);
           if (aws.allInstalled) {
-            storageConfig = {
-              type: 's3',
-              bucket: existing.bucket,
-              region: existing.region,
-              ...(existing.endpoint ? { endpoint: existing.endpoint } : {}),
-              credentialSource: 'doppler',
-            };
+            storageConfig = s3ConfigFromCredentials(existing);
             await saveStorageConfig(storageConfig);
-            process.env.ENVBEAM_S3_ACCESS_KEY = existing.accessKey;
-            process.env.ENVBEAM_S3_SECRET_KEY = existing.secretKey;
-            process.env.ENVBEAM_S3_BUCKET = existing.bucket;
-            process.env.ENVBEAM_S3_REGION = existing.region;
-            if (existing.endpoint) process.env.ENVBEAM_S3_ENDPOINT = existing.endpoint;
+            applyS3CredentialsToEnv(existing);
             logger.success('Imported storage settings from Doppler.');
           } else {
             logger.warn('AWS CLI is required to use storage; skipping import.');
@@ -213,7 +271,6 @@ export async function initCommand(opts: InitOptions): Promise<number> {
 
     if (storageConfig) {
       try {
-        const runner = new RealCommandRunner();
         const store = new RegistryStore(storageConfig, runner);
 
         // Check for name conflict
@@ -226,7 +283,7 @@ export async function initCommand(opts: InitOptions): Promise<number> {
           const entry: ProjectEntry = {
             name: workspace,
             gitRemote: gitUrl ?? '',
-            gitBranch: 'current',
+            gitBranch: resolveBranch(detection),
             configSnapshot: yaml,
             lastPush: new Date().toISOString(),
             machineId,

@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { pathExists, readFileIfExists } from '../util/fs.js';
 import { findComposeFile, parseCompose, type ComposeService } from './container.js';
+import { findFileShallow } from './scan.js';
 import type { DetectedField } from './types.js';
 
 interface EngineMatch {
@@ -175,9 +176,19 @@ export async function detectMigrateCommand(root: string): Promise<MigrateMarker 
   if (await pathExists(path.join(root, 'config', 'database.yml'))) {
     return { command: 'bin/rails db:migrate', source: 'config/database.yml' };
   }
-  // Django
+  // Python: Django
   if (await pathExists(path.join(root, 'manage.py'))) {
     return { command: 'python manage.py migrate', source: 'manage.py' };
+  }
+  // Python: Alembic (SQLAlchemy) — often kept at the repo root or under a service subdir
+  const alembicIni = await findFileShallow(root, ['alembic.ini'], { maxDepth: 2 });
+  if (alembicIni) {
+    const rel = path.relative(root, alembicIni);
+    // Run from the directory holding alembic.ini so its config is picked up.
+    const dir = path.dirname(rel);
+    const command =
+      dir === '.' ? 'alembic upgrade head' : `alembic -c ${rel} upgrade head`;
+    return { command, source: rel };
   }
   // Go: golang-migrate convention
   if (await pathExists(path.join(root, 'migrations'))) {

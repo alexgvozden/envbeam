@@ -115,13 +115,26 @@ export class RunContext {
 }
 
 async function readExistingDotenv(workspaceRoot: string, config: WorkspaceConfig): Promise<Record<string, string>> {
-  const rel = config.secrets?.dotenvPath ?? '.env';
-  try {
-    const text = await fs.readFile(path.join(workspaceRoot, rel), 'utf8');
-    return parseDotenv(text);
-  } catch {
-    return {};
+  // Merge the configured dotenv plus common local variants so DB connection
+  // details (and other vars) are found wherever the project keeps them. The
+  // configured/primary file wins; later files only fill gaps.
+  const primary = config.secrets?.dotenvPath ?? '.env';
+  const files = [primary, '.env.local', '.env.development', '.env.dev'];
+  const merged: Record<string, string> = {};
+  const seen = new Set<string>();
+  for (const rel of files) {
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+    try {
+      const text = await fs.readFile(path.join(workspaceRoot, rel), 'utf8');
+      for (const [k, v] of Object.entries(parseDotenv(text))) {
+        if (!(k in merged)) merged[k] = v;
+      }
+    } catch {
+      /* missing file — skip */
+    }
   }
+  return merged;
 }
 
 /** Load + detect + merge config, build registry, resolve identities. */

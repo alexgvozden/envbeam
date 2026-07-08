@@ -109,7 +109,7 @@ describe('pause edge cases', () => {
     cleanups.push(cleanup);
     const report = await runPause(await ctxOn(dir, baseRunner(), snapConfig({ target: 'local-folder', path: path.join(home, 'snaps') })), { force: false, snapshot: false, workMode: 'none' });
     expect(report.database?.snapshot).toBeUndefined();
-    expect(report.database?.skipped).toMatch(/forced skip/);
+    expect(report.database?.skipped).toMatch(/--no-snapshot/);
   });
 
   it('aborts upload when the dump exceeds the size cap', async () => {

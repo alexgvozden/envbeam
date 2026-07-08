@@ -131,6 +131,53 @@ export const TOOLS: Record<string, ToolDef> = {
     },
     checkArgs: ['--version'],
   },
+  // PostgreSQL client tools — pg_dump/psql ship together (libpq). Both entries
+  // use the same install command so ensureTools can request either.
+  pg_dump: {
+    command: 'pg_dump',
+    name: 'PostgreSQL client (pg_dump/psql)',
+    installCommands: {
+      win32: 'winget install PostgreSQL.PostgreSQL',
+      darwin: 'brew install libpq && brew link --force libpq',
+      linux: 'sudo apt-get install -y postgresql-client || sudo dnf install -y postgresql',
+    },
+    checkArgs: ['--version'],
+    url: 'https://www.postgresql.org/download/',
+  },
+  psql: {
+    command: 'psql',
+    name: 'PostgreSQL client (psql)',
+    installCommands: {
+      win32: 'winget install PostgreSQL.PostgreSQL',
+      darwin: 'brew install libpq && brew link --force libpq',
+      linux: 'sudo apt-get install -y postgresql-client || sudo dnf install -y postgresql',
+    },
+    checkArgs: ['--version'],
+    url: 'https://www.postgresql.org/download/',
+  },
+  // MySQL/MariaDB client tools — mysqldump/mysql ship together.
+  mysqldump: {
+    command: 'mysqldump',
+    name: 'MySQL client (mysqldump/mysql)',
+    installCommands: {
+      win32: 'winget install Oracle.MySQL',
+      darwin: 'brew install mysql-client && brew link --force mysql-client',
+      linux: 'sudo apt-get install -y default-mysql-client || sudo dnf install -y mysql',
+    },
+    checkArgs: ['--version'],
+    url: 'https://dev.mysql.com/downloads/',
+  },
+  mysql: {
+    command: 'mysql',
+    name: 'MySQL client (mysql)',
+    installCommands: {
+      win32: 'winget install Oracle.MySQL',
+      darwin: 'brew install mysql-client && brew link --force mysql-client',
+      linux: 'sudo apt-get install -y default-mysql-client || sudo dnf install -y mysql',
+    },
+    checkArgs: ['--version'],
+    url: 'https://dev.mysql.com/downloads/',
+  },
 };
 
 function getPlatform(): 'win32' | 'darwin' | 'linux' {

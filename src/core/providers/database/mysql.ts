@@ -9,8 +9,8 @@ import type {
   SnapshotOptions,
   ToolRequirement,
 } from '../types.js';
-import { SqlDatabaseProvider } from './base.js';
-import { resolveConnection } from './connection.js';
+import { SqlDatabaseProvider, firstInt, type DbOverview } from './base.js';
+import { resolveConnection, describeConnection } from './connection.js';
 
 const PART_KEYS = {
   host: ['MYSQL_HOST', 'DB_HOST'],
@@ -86,8 +86,28 @@ export class MysqlProvider extends SqlDatabaseProvider {
     return res.code === 0;
   }
 
+  connectionSummary(ctx: ProviderContext): string {
+    return describeConnection(resolveConnection(ctx, 'mysql', PART_KEYS));
+  }
+
   protected changeProbeSql(table: string): string {
     return `SELECT count(*) FROM \`${table.replace(/`/g, '``')}\``;
+  }
+
+  protected async databaseOverview(ctx: ProviderContext): Promise<DbOverview | null> {
+    try {
+      const size = await this.runSql(
+        ctx,
+        'SELECT COALESCE(SUM(data_length + index_length), 0) FROM information_schema.tables WHERE table_schema = DATABASE()',
+      );
+      const rows = await this.runSql(
+        ctx,
+        'SELECT COALESCE(SUM(table_rows), 0) FROM information_schema.tables WHERE table_schema = DATABASE()',
+      );
+      return { sizeBytes: firstInt(size), rows: firstInt(rows) };
+    } catch {
+      return null;
+    }
   }
 
   protected dumpExtension(opts: SnapshotOptions): string {

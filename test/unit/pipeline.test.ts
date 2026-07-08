@@ -30,8 +30,10 @@ afterEach(async () => {
 });
 
 /** A FakeRunner scripted for a healthy machine. */
-function happyRunner(opts: { dirty?: string[]; behind?: number } = {}): FakeRunner {
-  const runner = new FakeRunner({ available: ['git', 'doppler', 'docker', 'pg_dump', 'psql', 'claude-sync'] });
+function happyRunner(opts: { dirty?: string[]; behind?: number; noDbTools?: boolean } = {}): FakeRunner {
+  const avail = ['git', 'doppler', 'docker', 'claude-sync'];
+  if (!opts.noDbTools) avail.push('pg_dump', 'psql');
+  const runner = new FakeRunner({ available: avail });
   // versions
   runner.on((c, a) => a[0] === '--version', { stdout: 'tool 1.0.0' });
   // git
@@ -48,14 +50,21 @@ function happyRunner(opts: { dirty?: string[]; behind?: number } = {}): FakeRunn
   runner.on('git push', {});
   // doppler
   runner.on('doppler me', { stdout: '{"name":"me"}' });
+  runner.on('doppler projects', { stdout: JSON.stringify([{ name: 'keeper' }]) });
   runner.on('doppler secrets download', { stdout: JSON.stringify({ API_KEY: 'k', DATABASE_URL: 'postgres://app@localhost/keeper' }) });
   // docker / compose
   runner.on('docker info', { stdout: '25.0' });
   runner.on('docker compose', (_c, a) => (a.includes('ps') ? { stdout: JSON.stringify([{ Name: 'db', State: 'running' }]) } : {}));
   // postgres
   runner.on('psql', { stdout: '1' });
-  // migrate
-  runner.on('sh', { stdout: 'migrated' });
+  // sh: tool-install commands make the DB client appear; everything else is migrate
+  runner.on('sh', (_c, a) => {
+    if (/brew|apt-get|dnf|winget|install/.test(a.join(' '))) {
+      runner.available('pg_dump', 'psql');
+      return {};
+    }
+    return { stdout: 'migrated' };
+  });
   // session
   runner.on('claude-sync', {});
   return runner;
@@ -160,6 +169,16 @@ describe('pause pipeline', () => {
     expect(report.session?.action).toBe('pushed');
   });
 
+  it('records git remote + branch into Doppler on push', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const runner = happyRunner();
+    await runPause(await ctxOn(dir, runner, fullConfig()), { force: false, workMode: 'none' });
+    const set = runner.calls.find((c) => c.command === 'doppler' && c.args[0] === 'secrets' && c.args[1] === 'set');
+    expect(set).toBeTruthy();
+    expect(set!.args.some((a) => a.startsWith('ENVBEAM_GIT_BRANCH='))).toBe(true);
+  });
+
   it('refuses to drop dirty work without commit/stash/force', async () => {
     const { dir, cleanup } = await tmpDir();
     cleanups.push(cleanup);
@@ -204,7 +223,87 @@ describe('pause pipeline', () => {
     expect(state.lastSnapshotTimestamp).toBeTruthy();
   });
 
-  it('change-detection records a baseline then prompts on change', async () => {
+  it('two-way secrets: aborts before touching git when the provider is unauthenticated', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const runner = happyRunner();
+    runner.on('doppler me', { code: 1, stderr: 'you must provide a token' }); // not logged in
+    const cfg = fullConfig({ secrets: { provider: 'doppler', project: 'keeper', config: 'dev', sync: 'two-way' } });
+    await expect(
+      runPause(await ctxOn(dir, runner, cfg), { force: false, workMode: 'none' }),
+    ).rejects.toBeInstanceOf(PreflightError);
+    // fail-fast: git must not have been pushed
+    expect(runner.calls.some((c) => c.command === 'git' && c.args[0] === 'push')).toBe(false);
+  });
+
+  it('two-way secrets: aborts before git when the Doppler project is missing and creation is declined', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const runner = happyRunner();
+    runner.on('doppler projects', { stdout: '[]' }); // authed, but project does not exist
+    const decline = new AutoPrompter({ answers: [{ match: 'Create it now', value: false }] }); // user says no
+    const cfg = fullConfig({ secrets: { provider: 'doppler', project: 'keeper', config: 'dev', sync: 'two-way' } });
+    await expect(
+      runPause(await ctxOn(dir, runner, cfg, false, decline), { force: false, workMode: 'none' }),
+    ).rejects.toBeInstanceOf(PreflightError);
+    expect(runner.calls.some((c) => c.command === 'git' && c.args[0] === 'push')).toBe(false);
+    expect(runner.calls.some((c) => c.command === 'doppler' && c.args[0] === 'projects' && c.args[1] === 'create')).toBe(false);
+  });
+
+  it('two-way secrets: creates the Doppler project when missing and confirmed', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const runner = happyRunner();
+    let created = false;
+    runner.on('doppler projects', (_c, a) => {
+      if (a[0] === 'create') { created = true; return {}; }
+      return { stdout: created ? JSON.stringify([{ name: 'keeper' }]) : '[]' };
+    });
+    const cfg = fullConfig({ secrets: { provider: 'doppler', project: 'keeper', config: 'dev', sync: 'two-way' } });
+    const report = await runPause(await ctxOn(dir, runner, cfg), { force: false, workMode: 'none' });
+    expect(runner.calls.some((c) => c.command === 'doppler' && c.args[0] === 'projects' && c.args[1] === 'create' && c.args[2] === 'keeper')).toBe(true);
+    expect(report.git?.pushed).toBe(true);
+  });
+
+  it('two-way secrets: proceeds past preflight when authenticated', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const runner = happyRunner();
+    const cfg = fullConfig({ secrets: { provider: 'doppler', project: 'keeper', config: 'dev', sync: 'two-way' } });
+    const report = await runPause(await ctxOn(dir, runner, cfg), { force: false, workMode: 'none' });
+    expect(report.git?.pushed).toBe(true);
+    expect(report.secrets?.action).toBeDefined();
+  });
+
+  it('installs missing DB client tools on push instead of skipping (auto-install rule)', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const syncDir = path.join(envbeamHome, 'snaps');
+    const runner = happyRunner({ noDbTools: true }); // pg_dump/psql absent until "installed"
+    runner.on('psql', (_c, args) => (args.includes('SELECT 1') ? { stdout: '1' } : { stdout: '5' }));
+    runner.on('pg_dump', (_c, args) => {
+      const i = args.indexOf('-f');
+      if (i < 0) return { stdout: 'pg_dump 14.0' };
+      void fs.writeFile(args[i + 1]!, '-- dump\n');
+      return {};
+    });
+    const config = fullConfig({
+      database: {
+        provider: 'postgres',
+        mode: 'snapshot',
+        migrateCommand: 'm',
+        changeTables: ['seed_users'],
+        snapshot: { dataOnly: true, compress: false },
+        sync: { target: 'local-folder', path: syncDir, keep: 5 },
+      },
+    });
+    const report = await runPause(await ctxOn(dir, runner, config), { force: false, snapshot: true, workMode: 'none' });
+    // ran an install command and then succeeded in taking the snapshot
+    expect(runner.calls.some((c) => c.command === 'sh' && /brew|apt|install/.test(c.args.join(' ')))).toBe(true);
+    expect(report.database?.snapshot?.timestamp).toBeTruthy();
+  });
+
+  it('first push with nothing backed up snapshots; unchanged pushes skip; changes snapshot', async () => {
     const { dir, cleanup } = await tmpDir();
     cleanups.push(cleanup);
     const syncDir = path.join(envbeamHome, 'snaps');
@@ -227,16 +326,20 @@ describe('pause pipeline', () => {
         sync: { target: 'local-folder', path: syncDir, keep: 5 },
       },
     });
-    // first pause (auto) records baseline; no snapshot
+    // r1: first push and nothing backed up yet → takes an initial snapshot
     const r1 = await runPause(await ctxOn(dir, runner, config), { force: false, workMode: 'none' });
-    expect(r1.database?.snapshot).toBeUndefined();
+    expect(r1.database?.snapshot?.timestamp).toBeTruthy();
     const state = await loadState(dir);
     expect(state.dbFingerprint).toBeTruthy();
 
-    // change rows, second pause auto detects change and (prompter says yes) snapshots
+    // r2: nothing changed and a snapshot already exists → skips
+    const r2 = await runPause(await ctxOn(dir, runner, config), { force: false, workMode: 'none' });
+    expect(r2.database?.snapshot).toBeUndefined();
+
+    // r3: data changed → snapshot (prompter confirms)
     rows = 99;
-    const r2 = await runPause(await ctxOn(dir, runner, config, false, new AutoPrompter({ defaults: true })), { force: false, workMode: 'none' });
-    expect(r2.database?.snapshot?.timestamp).toBeTruthy();
+    const r3 = await runPause(await ctxOn(dir, runner, config, false, new AutoPrompter({ defaults: true })), { force: false, workMode: 'none' });
+    expect(r3.database?.snapshot?.timestamp).toBeTruthy();
   });
 });
 

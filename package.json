@@ -1,6 +1,6 @@
 {
   "name": "envbeam",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Beam your whole dev environment to any machine or VM. Pause here, resume there: code + secrets + container + database + AI session, under the right account for each.",
   "type": "module",
   "bin": {

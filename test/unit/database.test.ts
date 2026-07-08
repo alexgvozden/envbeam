@@ -53,6 +53,22 @@ describe('connection resolution', () => {
     const ctx = makeTestContext({ config: { version: 1, workspace: 'w', database: { mode: 'snapshot', connection: 'MY_DB' } }, env: { MY_DB: 'postgres://z@h/db' } }).providerCtx('database');
     expect(resolveConnection(ctx, 'postgres', { host: ['PGHOST'], port: [], user: [], password: [], database: [] }).url).toBe('postgres://z@h/db');
   });
+
+  it('normalizes a SQLAlchemy +driver scheme so CLI clients accept it', () => {
+    const p = parseDbUrl('postgresql+psycopg://agentlab:pw' + '@' + 'localhost:5432/agentlab');
+    expect(p.url).toBe('postgresql://agentlab:pw' + '@' + 'localhost:5432/agentlab');
+    expect(p).toMatchObject({ host: 'localhost', port: '5432', user: 'agentlab', database: 'agentlab' });
+  });
+
+  it('discovers an app-prefixed *_DATABASE_URL when no standard var is set', () => {
+    const ctx = makeTestContext({
+      config: { version: 1, workspace: 'w', database: { mode: 'snapshot' } },
+      env: { AGENTLAB_DATABASE_URL: 'postgresql+psycopg://agentlab:pw' + '@' + 'localhost:5432/agentlab', OTHER: 'x' },
+    }).providerCtx('database');
+    const parts = resolveConnection(ctx, 'postgres', { host: ['PGHOST'], port: ['PGPORT'], user: ['PGUSER'], password: ['PGPASSWORD'], database: ['PGDATABASE'] });
+    expect(parts.url).toBe('postgresql://agentlab:pw' + '@' + 'localhost:5432/agentlab');
+    expect(parts.database).toBe('agentlab');
+  });
 });
 
 describe('postgres provider', () => {
@@ -90,12 +106,15 @@ describe('postgres provider', () => {
     expect(second.changed).toBe(true);
   });
 
-  it('reports no change-detection when no tables configured', async () => {
+  it('produces a baseline from db size + row count even when no tables are configured', async () => {
     const runner = new FakeRunner({ available: ['psql'] });
+    runner.on('psql', (_c, args) => (args.includes('SELECT 1') ? { stdout: '1' } : { stdout: '4096' }));
     const provider = new PostgresProvider();
     const res = await provider.hasChanged(pgCtx(runner, '/tmp', {}), undefined);
     expect(res.changed).toBe(false);
-    expect(res.detail).toMatch(/no change-detection tables/);
+    expect(res.fingerprint).toBeTruthy(); // size+rows give a usable fingerprint
+    expect(res.detail).toMatch(/baseline/);
+    expect(res.detail).toMatch(/row/);
   });
 
   it('restores a plain SQL file via psql', async () => {

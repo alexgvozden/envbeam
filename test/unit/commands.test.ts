@@ -53,15 +53,19 @@ describe('init command', () => {
       'docker-compose.yml': 'services:\n  db:\n    image: postgres:16\n',
       '.env.example': 'API_KEY=\n',
     });
-    expect(await initCommand({ yes: true })).toBe(0);
+    // fake runner → no real doppler/aws/S3 network I/O during init
+    const runner = new FakeRunner();
+    expect(await initCommand({ yes: true, runner })).toBe(0);
     const cfg = await fs.readFile(path.join(dir, '.envbeam.yaml'), 'utf8');
     expect(cfg).toMatch(/workspace:/);
     expect(cfg).toMatch(/provider: doppler/);
 
-    // second run without force → refuses
-    expect(await initCommand({ yes: true })).toBe(1);
-    // with force → overwrites
-    expect(await initCommand({ yes: true, force: true })).toBe(0);
+    // second run without force → idempotent "already initialized" (exit 0, no overwrite)
+    out = '';
+    expect(await initCommand({ yes: true, runner })).toBe(0);
+    expect(out).toMatch(/already initialized/i);
+    // with force → re-scaffolds
+    expect(await initCommand({ yes: true, force: true, runner })).toBe(0);
   });
 });
 

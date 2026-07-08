@@ -85,6 +85,38 @@ describe('doppler provider', () => {
     const provider = new DopplerSecretsProvider();
     await expect(provider.pull(ctxFor(baseConfig({ provider: 'doppler' }), runner, dir))).rejects.toThrow(/doppler secrets download failed/);
   });
+
+  it('strips ENVBEAM_ bookkeeping vars from pulled secrets', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const runner = new FakeRunner({ available: ['doppler'] });
+    runner.on('doppler secrets download', {
+      stdout: JSON.stringify({ API_KEY: 'k', ENVBEAM_GIT_REMOTE: 'git@x:y.git', ENVBEAM_GIT_BRANCH: 'wave-1' }),
+    });
+    const provider = new DopplerSecretsProvider();
+    const pulled = await provider.pull(ctxFor(baseConfig({ provider: 'doppler', project: 'keeper', config: 'dev' }), runner, dir));
+    expect(pulled.keys).toEqual(['API_KEY']);
+    expect(pulled.values.ENVBEAM_GIT_REMOTE).toBeUndefined();
+  });
+
+  it('recordMeta sets ENVBEAM_ git coordinates via `doppler secrets set`', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const runner = new FakeRunner({ available: ['doppler'] });
+    const provider = new DopplerSecretsProvider();
+    const res = await provider.recordMeta(
+      ctxFor(baseConfig({ provider: 'doppler', project: 'keeper', config: 'dev' }), runner, dir),
+      { ENVBEAM_GIT_REMOTE: 'git@github.com:me/keeper.git', ENVBEAM_GIT_BRANCH: 'wave-1', ENVBEAM_GIT_EMPTY: '' },
+    );
+    expect(res.ok).toBe(true);
+    const set = runner.callsTo('doppler').find((c) => c.args[0] === 'secrets' && c.args[1] === 'set')!;
+    expect(set.args).toContain('ENVBEAM_GIT_REMOTE=git@github.com:me/keeper.git');
+    expect(set.args).toContain('ENVBEAM_GIT_BRANCH=wave-1');
+    // empty values are dropped, and project/config are targeted
+    expect(set.args.some((a) => a.startsWith('ENVBEAM_GIT_EMPTY'))).toBe(false);
+    expect(set.args).toContain('--project');
+    expect(set.args).toContain('keeper');
+  });
 });
 
 describe('onepassword provider', () => {

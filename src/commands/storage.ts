@@ -41,12 +41,32 @@ const STORAGE_PROVIDERS: StorageProvider[] = [
   { value: 'custom', name: 'Other S3-compatible (MinIO, Ceph, …)', endpointHint: 'https://s3.example.com', region: 'auto' },
 ];
 
-interface S3Credentials {
+export interface S3Credentials {
   endpoint: string;
   bucket: string;
   region: string;
   accessKey: string;
   secretKey: string;
+}
+
+/** Build the persisted global storage config from a set of S3 credentials. */
+export function s3ConfigFromCredentials(creds: S3Credentials): GlobalStorageConfig {
+  return {
+    type: 's3',
+    bucket: creds.bucket,
+    region: creds.region,
+    ...(creds.endpoint ? { endpoint: creds.endpoint } : {}),
+    credentialSource: 'doppler',
+  };
+}
+
+/** Populate process.env so RegistryStore can authenticate to S3 in this process. */
+export function applyS3CredentialsToEnv(creds: S3Credentials): void {
+  process.env.ENVBEAM_S3_ACCESS_KEY = creds.accessKey;
+  process.env.ENVBEAM_S3_SECRET_KEY = creds.secretKey;
+  process.env.ENVBEAM_S3_BUCKET = creds.bucket;
+  process.env.ENVBEAM_S3_REGION = creds.region;
+  if (creds.endpoint) process.env.ENVBEAM_S3_ENDPOINT = creds.endpoint;
 }
 
 /**
@@ -62,13 +82,15 @@ export async function readExistingDopplerStorage(
     { allowFailure: true },
   );
   if (res.code !== 0) return null;
-  let parsed: Record<string, { computed?: string }>;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(res.stdout) as Record<string, { computed?: string }>;
+    parsed = JSON.parse(res.stdout);
   } catch {
     return null;
   }
-  const get = (k: string) => parsed[k]?.computed ?? '';
+  if (!parsed || typeof parsed !== 'object') return null;
+  const secrets = parsed as Record<string, { computed?: string }>;
+  const get = (k: string) => secrets[k]?.computed ?? '';
   const bucket = get('ENVBEAM_S3_BUCKET');
   const accessKey = get('ENVBEAM_S3_ACCESS_KEY');
   const secretKey = get('ENVBEAM_S3_SECRET_KEY');
@@ -181,9 +203,15 @@ export async function storageSetupCommand(opts: StorageSetupOptions): Promise<nu
               STORAGE_PROVIDERS.map((p) => ({ name: p.name, value: p.value })),
               'r2',
             );
-      const provider = STORAGE_PROVIDERS.find((p) => p.value === providerId) ?? STORAGE_PROVIDERS[4]!;
+      const provider =
+        STORAGE_PROVIDERS.find((p) => p.value === providerId) ??
+        STORAGE_PROVIDERS.find((p) => p.value === 'custom')!;
 
-      endpoint = opts.endpoint ?? (await prompter.input('S3 endpoint URL', provider.endpointHint));
+      // Only pre-fill the endpoint hint for an interactive picker. With CLI creds
+      // (non-interactive intent) a missing --endpoint must stay empty so the
+      // required-endpoint check below fires instead of silently saving the hint.
+      const endpointDefault = hasCliCreds ? '' : provider.endpointHint;
+      endpoint = opts.endpoint ?? (await prompter.input('S3 endpoint URL', endpointDefault));
       // AWS S3 needs no custom endpoint; everything else does.
       if (!endpoint && provider.value !== 'aws') {
         throw new EnvbeamError('Endpoint is required for S3-compatible storage.', { exitCode: 2 });
@@ -277,13 +305,8 @@ export async function storageSetupCommand(opts: StorageSetupOptions): Promise<nu
 
     // 8. Save storage config to global config
     logger.info('Saving storage configuration…');
-    const storageConfig: GlobalStorageConfig = {
-      type: 's3',
-      bucket,
-      region,
-      ...(endpoint ? { endpoint } : {}),
-      credentialSource: 'doppler',
-    };
+    const creds: S3Credentials = { endpoint, bucket, region, accessKey, secretKey };
+    const storageConfig = s3ConfigFromCredentials(creds);
     await saveStorageConfig(storageConfig);
 
     // 9. Initialize registry in S3
@@ -291,11 +314,7 @@ export async function storageSetupCommand(opts: StorageSetupOptions): Promise<nu
     const registryStore = new RegistryStore(storageConfig, runner);
 
     // Temporarily set env vars for registry initialization
-    process.env.ENVBEAM_S3_ACCESS_KEY = accessKey;
-    process.env.ENVBEAM_S3_SECRET_KEY = secretKey;
-    if (endpoint) process.env.ENVBEAM_S3_ENDPOINT = endpoint;
-    process.env.ENVBEAM_S3_BUCKET = bucket;
-    process.env.ENVBEAM_S3_REGION = region;
+    applyS3CredentialsToEnv(creds);
 
     const created = await registryStore.initializeIfNeeded();
     if (created) {

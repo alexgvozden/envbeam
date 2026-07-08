@@ -2,6 +2,43 @@ import type { RunContext } from './context.js';
 import { resolveActiveProviders } from './providers.js';
 import type { BaseProvider, ProviderContext, ProviderKind, ToolRequirement } from '../providers/types.js';
 import { syncTargetTools, requiredCryptoTools, createSyncTarget } from '../sync/index.js';
+import { PreflightError } from '../util/errors.js';
+import { ensureSecretsAuth, ensureSecretsProject, loginHint } from '../providers/secretsAuth.js';
+
+/**
+ * Ensure the active secrets provider is usable BEFORE the pipeline mutates
+ * anything (e.g. git push). Delegates to the shared {@link ensureSecretsAuth},
+ * which offers to run `doppler login` / `op signin` on the spot (honouring a
+ * resolved token identity too) — so `init`, `push`, and `resume` behave
+ * identically. No-op when no secrets provider is configured. Throws
+ * {@link PreflightError} only when the CLI is missing, or the user declined /
+ * login failed and it's still unauthenticated.
+ */
+export async function assertSecretsAuth(ctx: RunContext): Promise<void> {
+  const probe = await ensureSecretsAuth(ctx.providerCtx('secrets'), { offerLogin: true });
+  if (!probe) return;
+  if (!probe.installed) {
+    throw new PreflightError(
+      `${probe.tool} is required for the "${probe.provider}" secrets provider but was not found.`,
+      probe.installHint,
+    );
+  }
+  if (!probe.authenticated) {
+    throw new PreflightError(
+      `Not authenticated with ${probe.provider}${probe.detail ? ` — ${probe.detail}` : ''}.`,
+      loginHint(probe.provider),
+    );
+  }
+  // Authenticated — make sure the backing project/config actually exists
+  // (offers to create it interactively) before the pipeline uploads/pulls.
+  const ready = await ensureSecretsProject(ctx.providerCtx('secrets'));
+  if (ready && !ready.ready) {
+    throw new PreflightError(
+      `${probe.provider} not ready — ${ready.detail ?? 'backing project/config missing'}.`,
+      ready.hint ?? loginHint(probe.provider),
+    );
+  }
+}
 
 export interface ToolCheck {
   command: string;

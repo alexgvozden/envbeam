@@ -8,6 +8,7 @@ import type {
   SecretsPushResult,
   SecretsSetupResult,
   SecretsSetupOptions,
+  SecretsReadyResult,
   ProviderContext,
   ToolRequirement,
 } from '../types.js';
@@ -73,6 +74,7 @@ export class DopplerSecretsProvider implements SecretsProvider {
     const values: Record<string, string> = {};
     for (const [k, v] of Object.entries(parsed)) {
       if (k.startsWith('DOPPLER_')) continue; // skip provider metadata vars
+      if (k.startsWith('ENVBEAM_')) continue; // skip envbeam bookkeeping (git remote/branch)
       values[k] = v == null ? '' : String(v);
     }
     const keys = Object.keys(values);
@@ -81,6 +83,57 @@ export class DopplerSecretsProvider implements SecretsProvider {
 
   async materialize(ctx: ProviderContext, pulled: SecretsPullResult): Promise<MaterializeResult> {
     return materializeSecrets(ctx, pulled);
+  }
+
+  async ensureReady(ctx: ProviderContext): Promise<SecretsReadyResult> {
+    const project = ctx.config.secrets?.project;
+    // No project declared → rely on the repo's doppler.yaml scope; nothing to check.
+    if (!project) return { ready: true };
+
+    const env = dopplerEnv(ctx);
+    const list = await ctx.runner.run('doppler', ['projects', '--json'], { env, allowFailure: true });
+    if (list.code === 0) {
+      try {
+        const projects = JSON.parse(list.stdout) as Array<{ id?: string; name?: string }>;
+        if (projects.some((p) => p.id === project || p.name === project)) {
+          return { ready: true, detail: `Doppler project '${project}' already exists` };
+        }
+      } catch {
+        /* fall through to create */
+      }
+    }
+
+    const createCmd = `doppler projects create ${project}`;
+    // The prompter encodes interactivity: a real terminal asks; a non-TTY run
+    // auto-declines (unless `--yes`), so we never create silently or hang.
+    const yes = await ctx.prompter.confirm(`Doppler project '${project}' doesn't exist. Create it now?`, true);
+    if (!yes) {
+      return { ready: false, detail: `project '${project}' not found`, hint: `Create it with \`${createCmd}\`.` };
+    }
+    const created = await ctx.runner.run('doppler', ['projects', 'create', project], { env, allowFailure: true });
+    if (created.code !== 0) {
+      return {
+        ready: false,
+        detail: created.stderr.trim() || created.stdout.trim() || `failed to create project '${project}'`,
+        hint: `Create it manually with \`${createCmd}\`.`,
+      };
+    }
+    ctx.logger.success(`Created Doppler project '${project}' (configs: dev, stg, prd).`);
+    return { ready: true, created: true };
+  }
+
+  async recordMeta(ctx: ProviderContext, meta: Record<string, string>): Promise<{ ok: boolean; detail?: string }> {
+    const pairs = Object.entries(meta).filter(([, v]) => v !== '' && v != null);
+    if (!pairs.length) return { ok: true };
+    if (ctx.dryRun) return { ok: true, detail: 'dry-run' };
+    const res = await ctx.runner.run(
+      'doppler',
+      ['secrets', 'set', ...pairs.map(([k, v]) => `${k}=${v}`), ...projectArgs(ctx)],
+      { cwd: ctx.workspaceRoot, env: dopplerEnv(ctx), allowFailure: true },
+    );
+    return res.code === 0
+      ? { ok: true }
+      : { ok: false, detail: res.stderr.trim() || res.stdout.trim() || `exit ${res.code}` };
   }
 
   async status(ctx: ProviderContext): Promise<SecretsStatus> {
@@ -104,10 +157,10 @@ export class DopplerSecretsProvider implements SecretsProvider {
     }
 
     const secrets = parseDotenv(text);
-    // Filter out DOPPLER_ prefixed vars
+    // Filter out DOPPLER_ / ENVBEAM_ prefixed vars (provider + envbeam bookkeeping)
     const filtered: Record<string, string> = {};
     for (const [k, v] of Object.entries(secrets)) {
-      if (!k.startsWith('DOPPLER_')) filtered[k] = v;
+      if (!k.startsWith('DOPPLER_') && !k.startsWith('ENVBEAM_')) filtered[k] = v;
     }
 
     const keys = Object.keys(filtered);

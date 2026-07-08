@@ -1,6 +1,7 @@
 import path from 'node:path';
 import YAML from 'yaml';
 import { pathExists, readFileIfExists } from '../util/fs.js';
+import { findFileShallow } from './scan.js';
 import type { DetectedField } from './types.js';
 
 const COMPOSE_NAMES = [
@@ -47,15 +48,14 @@ function coerceEnv(env: unknown): Record<string, string> | undefined {
 }
 
 export async function findComposeFile(root: string): Promise<string | null> {
-  for (const name of COMPOSE_NAMES) {
-    if (await pathExists(path.join(root, name))) return path.join(root, name);
-  }
-  // also check .devcontainer/docker-compose.yml
-  for (const name of COMPOSE_NAMES) {
-    const p = path.join(root, '.devcontainer', name);
-    if (await pathExists(p)) return p;
-  }
-  return null;
+  // Scan the root plus a couple of levels down so compose files kept under
+  // infra/, deploy/, docker/, .devcontainer/, etc. are still detected in
+  // monorepo layouts. Root-level files still win (shallowest match first);
+  // among sibling subdirs, dev-oriented locations beat deploy/prod ones.
+  return findFileShallow(root, COMPOSE_NAMES, {
+    maxDepth: 2,
+    preferDirs: ['.devcontainer', 'docker', '.docker', 'infra', 'dev', 'local', 'compose'],
+  });
 }
 
 export async function parseCompose(file: string): Promise<ParsedCompose | null> {
