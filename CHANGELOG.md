@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.6] - 2026-07-08
+
+### Fixed
+- **Shadowed/stale installs are now self-evident and self-repairing** — verified empirically that a fresh git install of 0.11.5 always prints the `(build …)` stamp, so a bare version in `-V` proves the shell is resolving a *different, stale* install (e.g. an old `npm link`ed checkout shadowing the global bin). Now: (a) a compiled `dist/` with **no** build stamp counts as stale and triggers the in-place rebuild + re-exec; (b) `--verbose` leads with `envbeam <version+build> · <cli path>`; (c) **every non-zero exit** prints the same identity footer — so the running install is visible in any error output. Diagnose duplicates with `which -a envbeam`.
+
 ## [0.11.5] - 2026-07-08
 
 ### Fixed

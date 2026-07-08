@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Command } from 'commander';
@@ -47,17 +48,33 @@ try {
   /* dev run via tsx, or a build predating the stamp */
 }
 
+/** True when executing compiled output (dist/), not tsx over src/. */
+const IS_COMPILED = fileURLToPath(import.meta.url).includes(`${path.sep}dist${path.sep}`);
+/** The script the shell actually resolved — pinpoints WHICH install is running. */
+const CLI_PATH = process.argv[1] ?? fileURLToPath(import.meta.url);
+/** Version + build stamp; a stale dist can't masquerade as a fresh version. */
+const VERSION_STRING = BUILD?.commit
+  ? `${VERSION} (build ${BUILD.commit}${BUILD.builtAt ? `, ${BUILD.builtAt}` : ''})`
+  : VERSION;
+
 /**
- * If dist/ was built from a different version than the installed package.json,
- * self-heal: rebuild in place (source checkouts) and re-exec the command, or —
- * when there's no source to build from — warn loudly with the reinstall command.
+ * If dist/ was built from a different version than the installed package.json —
+ * or predates build stamping entirely (compiled output with no build-info.json)
+ * — self-heal: rebuild in place (source checkouts) and re-exec the command, or,
+ * when there's no source to build from, warn loudly with the reinstall command.
  */
 function ensureFreshBuild(): void {
-  if (!BUILD || BUILD.version === VERSION || process.env.ENVBEAM_SKIP_REBUILD) return;
+  const stale = BUILD ? BUILD.version !== VERSION : IS_COMPILED;
+  if (!stale || process.env.ENVBEAM_SKIP_REBUILD) return;
 
   console.error(
-    pc.yellow(`! envbeam build is stale: running code built for v${BUILD.version}, but v${VERSION} is installed.`),
+    pc.yellow(
+      BUILD
+        ? `! envbeam build is stale: running code built for v${BUILD.version}, but v${VERSION} is installed.`
+        : `! envbeam build is stale: dist/ predates build stamping (v${VERSION} is installed).`,
+    ),
   );
+  console.error(pc.dim(`  running: ${CLI_PATH}`));
 
   const root = path.dirname(require.resolve('../package.json'));
   const canRebuild =
@@ -85,8 +102,12 @@ function ensureFreshBuild(): void {
 
 function globalOpts(cmd: Command): GlobalCliOptions {
   const g = cmd.optsWithGlobals();
-  // Verbose → trace every external command + exit code to stderr.
-  if (g.verbose) setCommandTrace(true);
+  // Verbose → trace every external command + exit code to stderr, and lead
+  // with the build identity so stale/shadowed installs are instantly visible.
+  if (g.verbose) {
+    setCommandTrace(true);
+    process.stderr.write(pc.dim(`envbeam ${VERSION_STRING} · ${CLI_PATH}\n`));
+  }
   return {
     dryRun: g.dryRun,
     yes: g.yes,
@@ -97,15 +118,16 @@ function globalOpts(cmd: Command): GlobalCliOptions {
 
 async function main(): Promise<void> {
   ensureFreshBuild();
+  // Every failure self-identifies: which version, which build, WHICH install —
+  // so a shadowed/stale install is visible in the error output itself.
+  process.on('exit', (code) => {
+    if (code !== 0) process.stderr.write(pc.dim(`envbeam ${VERSION_STRING} · ${CLI_PATH}\n`));
+  });
   const program = new Command();
-  // -V includes the build stamp so a stale dist can never masquerade as fresh.
-  const versionString = BUILD?.commit
-    ? `${VERSION} (build ${BUILD.commit}${BUILD.builtAt ? `, ${BUILD.builtAt}` : ''})`
-    : VERSION;
   program
     .name('envbeam')
     .description('Beam your whole dev environment to any machine. Pause here, resume there.')
-    .version(versionString, '-V, --version')
+    .version(VERSION_STRING, '-V, --version')
     .option('--dry-run', 'preview actions without changing anything')
     .option('-y, --yes', 'assume yes / accept defaults (non-interactive)')
     .option('-v, --verbose', 'verbose output')
