@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.3] - 2026-07-08
+
+### Added
+- **`--verbose` now traces every external command** — with `-v`/`--verbose`, envbeam prints each shell-out (`$ docker info …`, `$ doppler secrets …`, `$ aws s3 cp …`) and its exit code to stderr, so you can see exactly what it's doing and where a step fails. (Global flag: put it before the subcommand, e.g. `envbeam --verbose pull`.)
+
 ## [0.11.2] - 2026-07-08
 
 ### Fixed

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import pc from 'picocolors';
 
 export interface RunOptions {
   /** Working directory for the command. */
@@ -47,8 +48,27 @@ export interface CommandRunner {
   which(command: string): Promise<string | null>;
 }
 
+/**
+ * When on, RealCommandRunner traces every external command + exit code to
+ * stderr. Toggled by `--verbose` so users can see exactly what envbeam runs.
+ */
+let COMMAND_TRACE = false;
+export function setCommandTrace(on: boolean): void {
+  COMMAND_TRACE = on;
+}
+
+function traceStart(command: string, args: string[]): void {
+  if (COMMAND_TRACE) process.stderr.write(pc.dim(`  $ ${[command, ...args].join(' ')}`) + '\n');
+}
+function traceEnd(command: string, code: number, stderr: string): void {
+  if (!COMMAND_TRACE) return;
+  const firstErr = code !== 0 ? stderr.trim().split(/\r?\n/)[0] : '';
+  process.stderr.write(pc.dim(`    → exit ${code}${firstErr ? `: ${firstErr}` : ''}`) + '\n');
+}
+
 export class RealCommandRunner implements CommandRunner {
   async run(command: string, args: string[], options: RunOptions = {}): Promise<RunResult> {
+    traceStart(command, args);
     return new Promise<RunResult>((resolve, reject) => {
       const child = spawn(command, args, {
         cwd: options.cwd,
@@ -91,9 +111,11 @@ export class RealCommandRunner implements CommandRunner {
         // allowFailure, just a non-zero result the caller can inspect — not a
         // crash. This keeps best-effort steps tolerant of missing tools.
         if (options.allowFailure) {
+          traceEnd(command, 127, (err as Error).message);
           resolve({ command, args, code: 127, stdout, stderr: `${stderr}${(err as Error).message}` });
           return;
         }
+        traceEnd(command, 127, (err as Error).message);
         reject(err);
       });
 
@@ -106,6 +128,7 @@ export class RealCommandRunner implements CommandRunner {
           stdout,
           stderr: timedOut ? `${stderr}\n[envbeam] command timed out` : stderr,
         };
+        traceEnd(command, result.code, result.stderr);
         if (result.code !== 0 && !options.allowFailure) {
           reject(new CommandError(result));
           return;

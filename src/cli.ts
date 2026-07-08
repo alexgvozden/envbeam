@@ -2,6 +2,7 @@
 import { createRequire } from 'node:module';
 import { Command } from 'commander';
 import pc from 'picocolors';
+import { setCommandTrace } from './core/util/exec.js';
 import { initCommand } from './commands/init.js';
 import { pullCommand } from './commands/pull.js';
 import { pushCommand } from './commands/push.js';
@@ -29,6 +30,8 @@ const { version: VERSION } = require('../package.json') as { version: string };
 
 function globalOpts(cmd: Command): GlobalCliOptions {
   const g = cmd.optsWithGlobals();
+  // Verbose → trace every external command + exit code to stderr.
+  if (g.verbose) setCommandTrace(true);
   return {
     dryRun: g.dryRun,
     yes: g.yes,
