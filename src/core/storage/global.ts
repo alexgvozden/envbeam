@@ -21,6 +21,9 @@ export interface GlobalEncryptionConfig {
  * Priority: environment variables > Doppler envbeam-global project
  */
 export async function getGlobalStorageConfig(runner: CommandRunner): Promise<GlobalStorageConfig | null> {
+  // Escape hatch for offline use and hermetic tests: never reach out to storage.
+  if (process.env.ENVBEAM_DISABLE_STORAGE) return null;
+
   // Check environment variables first
   const fromEnv = getFromEnv();
   if (fromEnv) return fromEnv;

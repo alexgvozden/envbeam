@@ -42,7 +42,9 @@ async function eb(cwd: string, home: string, ...args: string[]) {
   const res = await runner.run('node', [CLI, ...args], {
     cwd,
     allowFailure: true,
-    env: { ENVBEAM_HOME: home, ENVBEAM_CREDENTIAL_STORE: 'file', NO_COLOR: '1' },
+    // ENVBEAM_DISABLE_STORAGE keeps the compiled CLI from reaching the real
+    // Doppler/S3 registry (the subprocess inherits process.env otherwise).
+    env: { ENVBEAM_HOME: home, ENVBEAM_CREDENTIAL_STORE: 'file', NO_COLOR: '1', ENVBEAM_DISABLE_STORAGE: '1' },
   });
   return { code: res.code, out: strip(res.stdout), err: strip(res.stderr) };
 }

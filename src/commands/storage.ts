@@ -122,48 +122,58 @@ export interface EnsureStorageDeps {
  * Only if none of that yields a config do we guide the user to `envbeam setup`.
  * Returns true when storage is ready to use.
  */
-export async function ensureStorageReady(deps: EnsureStorageDeps): Promise<boolean> {
+export async function ensureStorageReady(
+  deps: EnsureStorageDeps,
+  opts: { silent?: boolean } = {},
+): Promise<boolean> {
   const { runner, logger, prompter } = deps;
+  // `silent` = opportunistic (push/init registration): probe & import if easy,
+  // but never prompt or print guidance. Non-silent installs/prompts and guides.
+  const silent = opts.silent ?? false;
+
+  // Escape hatch (offline / hermetic tests).
+  if (process.env.ENVBEAM_DISABLE_STORAGE) return false;
 
   // Already configured locally (or via ENVBEAM_S3_* env)? Nothing to do.
   if (await isStorageConfigured()) return true;
 
-  logger.info('Storage not configured yet — checking Doppler for your settings…');
-
-  // 1) Doppler CLI present (install it for the user if not).
-  const doppler = await ensureTools(['doppler'], runner, logger, prompter);
-  if (!doppler.allInstalled) {
-    logger.warn('Doppler CLI is needed to load your storage settings.');
-    logger.hint('Run `envbeam setup` to configure S3 storage manually.');
+  const fail = (warn: string, hint?: string): boolean => {
+    if (!silent) {
+      logger.warn(warn);
+      if (hint) logger.hint(hint);
+    }
     return false;
-  }
+  };
 
-  // 2) Signed in to Doppler (offer login on an interactive terminal).
-  const auth = await checkSecretsAuth('doppler', { runner, logger, prompter, workspaceRoot: process.cwd() });
-  if (!auth?.authenticated) {
-    logger.warn('Not signed in to Doppler, so storage settings can’t be loaded.');
-    logger.hint(loginHint('doppler'));
-    return false;
-  }
+  if (!silent) logger.info('Storage not configured yet — checking Doppler for your settings…');
+
+  // 1) Doppler CLI present (install it for the user if not; silent = probe only).
+  const hasDoppler = silent
+    ? Boolean(await runner.which('doppler'))
+    : (await ensureTools(['doppler'], runner, logger, prompter)).allInstalled;
+  if (!hasDoppler) return fail('Doppler CLI is needed to load your storage settings.', 'Run `envbeam setup` to configure S3 storage manually.');
+
+  // 2) Signed in to Doppler (offer login when interactive; silent = probe only).
+  const authed = silent
+    ? (await runner.run('doppler', ['me', '--json'], { allowFailure: true })).code === 0
+    : Boolean((await checkSecretsAuth('doppler', { runner, logger, prompter, workspaceRoot: process.cwd() }))?.authenticated);
+  if (!authed) return fail('Not signed in to Doppler, so storage settings can’t be loaded.', loginHint('doppler'));
 
   // 3) Import S3 settings from Doppler if they exist there.
   const existing = await readExistingDopplerStorage(runner).catch(() => null);
   if (existing) {
-    const aws = await ensureTools(['aws'], runner, logger, prompter);
-    if (!aws.allInstalled) {
-      logger.warn('The AWS CLI (S3 client) is required to use storage.');
-      return false;
-    }
+    const hasAws = silent
+      ? Boolean(await runner.which('aws'))
+      : (await ensureTools(['aws'], runner, logger, prompter)).allInstalled;
+    if (!hasAws) return fail('The AWS CLI (S3 client) is required to use storage.');
     await saveStorageConfig(s3ConfigFromCredentials(existing));
     applyS3CredentialsToEnv(existing);
-    logger.success(`Loaded storage settings from Doppler (bucket: ${existing.bucket}).`);
+    if (!silent) logger.success(`Loaded storage settings from Doppler (bucket: ${existing.bucket}).`);
     return true;
   }
 
   // 4) Nothing found anywhere — guide to the interactive setup.
-  logger.warn('No storage settings found in Doppler.');
-  logger.hint('Run `envbeam setup` to configure S3 storage (Cloudflare R2, Hetzner, B2, AWS, …).');
-  return false;
+  return fail('No storage settings found in Doppler.', 'Run `envbeam setup` to configure S3 storage (Cloudflare R2, Hetzner, B2, AWS, …).');
 }
 
 /**

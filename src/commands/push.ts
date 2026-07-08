@@ -3,7 +3,8 @@ import { promises as fs } from 'node:fs';
 import { buildRunContext, type RunContext } from '../core/pipeline/context.js';
 import { runPause, type PauseOptions } from '../core/pipeline/pause.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
-import { isStorageConfigured, createRegistryStore, type ProjectEntry } from '../core/registry/index.js';
+import { createRegistryStore, type ProjectEntry } from '../core/registry/index.js';
+import { ensureStorageReady } from './storage.js';
 import { getMachineId } from '../core/util/machine.js';
 import { detectedValue, resolveBranch } from '../core/detect/types.js';
 import type { Logger } from '../core/util/logger.js';
@@ -180,8 +181,10 @@ export async function pushCommand(opts: PushCliOptions): Promise<number> {
       message,
     });
 
-    // Register/update project in registry after successful push
-    if (await isStorageConfigured()) {
+    // Register/update project in registry after successful push. Opportunistically
+    // self-heal storage from Doppler (silent — no prompts on every push), so the
+    // project auto-registers once storage is set up, without dead-ending.
+    if (await ensureStorageReady({ runner: ctx.runner, logger, prompter }, { silent: true })) {
       try {
         const store = await createRegistryStore(ctx.runner);
         const configContent = await fs.readFile(ctx.configPath, 'utf8');

@@ -231,6 +231,8 @@ export async function createRegistryStore(runner: CommandRunner): Promise<Regist
  * Check if global storage is configured.
  */
 export async function isStorageConfigured(): Promise<boolean> {
+  // Escape hatch for offline use and hermetic tests: never touch remote storage.
+  if (process.env.ENVBEAM_DISABLE_STORAGE) return false;
   const globalConfig = await loadGlobalConfig();
   return !!globalConfig.storage;
 }
