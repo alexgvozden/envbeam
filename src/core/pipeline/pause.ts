@@ -206,6 +206,8 @@ async function pauseDatabase(
     if (active.database.connectionSummary) {
       log.sub(pc.dim(`connecting to ${active.database.connectionSummary(dctx)}`));
     }
+    const ambiguous = active.database.ambiguityWarning?.(dctx);
+    if (ambiguous) log.warn(ambiguous);
   }
 
   if (opts.snapshot === undefined && db.mode === 'snapshot') {

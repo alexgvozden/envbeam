@@ -162,6 +162,8 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
   // 6. Database
   if (ctx.config.database) {
     log.step('Database');
+    const ambiguous = active.database?.ambiguityWarning?.(ctx.providerCtx('database'));
+    if (ambiguous) log.warn(ambiguous);
     // If we just started the container, the DB may need a moment to accept
     // connections before migrations/restore — wait for it (best-effort).
     if (willStartContainer && active.database && !ctx.dryRun) {

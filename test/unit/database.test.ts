@@ -228,3 +228,25 @@ describe('migrate runner', () => {
     expect(res.detail).toMatch(/fail/);
   });
 });
+
+describe('findDatabaseUrls / ambiguity', () => {
+  it('detects DB URLs by scheme (any var name) and warns on same-engine ambiguity', async () => {
+    const { findDatabaseUrls, ambiguousUrlWarning } = await import('../../src/core/providers/database/connection.js');
+    const env = {
+      AGENTLAB_DATABASE_URL: 'postgresql+psycopg://app:pw@localhost:5432/app',
+      READ_REPLICA_URL: 'postgres://ro:pw@replica:5432/app',
+      CACHE_URL: 'redis://localhost:6379', // not a supported engine → ignored
+      MYSQL_URL: 'mysql://u:pw@h/db',
+    };
+    const hits = findDatabaseUrls(env);
+    expect(hits.filter((h) => h.engine === 'postgres').map((h) => h.key).sort()).toEqual(['AGENTLAB_DATABASE_URL', 'READ_REPLICA_URL']);
+    expect(hits.some((h) => h.key === 'CACHE_URL')).toBe(false);
+    // two postgres URLs → warn, naming the picked var
+    const warn = ambiguousUrlWarning(env, 'postgres', 'AGENTLAB_DATABASE_URL');
+    expect(warn).toMatch(/Multiple postgres/);
+    expect(warn).toMatch(/using AGENTLAB_DATABASE_URL/);
+    expect(warn).toMatch(/database\.connection/);
+    // single mysql URL → no warning
+    expect(ambiguousUrlWarning(env, 'mysql', 'MYSQL_URL')).toBeNull();
+  });
+})

@@ -234,6 +234,8 @@ export interface DatabaseProvider extends BaseProvider {
   kind: 'database';
   /** Human-readable connection target (e.g. `agentlab@localhost:5432/agentlab`). */
   connectionSummary?(ctx: ProviderContext): string;
+  /** Warning when multiple same-engine DB URLs are present (else null). */
+  ambiguityWarning?(ctx: ProviderContext): string | null;
   hasChanged(ctx: ProviderContext, sinceFingerprint?: string): Promise<DbChangeResult>;
   snapshot(ctx: ProviderContext, opts: SnapshotOptions): Promise<SnapshotResult>;
   restore(ctx: ProviderContext, snapshotFile: string): Promise<RestoreResult>;

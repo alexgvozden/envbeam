@@ -8,7 +8,7 @@ import type {
   ToolRequirement,
 } from '../types.js';
 import { SqlDatabaseProvider, firstInt, type DbOverview } from './base.js';
-import { resolveConnection, describeConnection, type DbConnectionParts } from './connection.js';
+import { resolveConnection, describeConnection, ambiguousUrlWarning, type DbConnectionParts } from './connection.js';
 
 const PART_KEYS = {
   host: ['PGHOST', 'POSTGRES_HOST', 'DB_HOST'],
@@ -75,6 +75,10 @@ export class PostgresProvider extends SqlDatabaseProvider {
 
   connectionSummary(ctx: ProviderContext): string {
     return describeConnection(conn(ctx).parts);
+  }
+
+  ambiguityWarning(ctx: ProviderContext): string | null {
+    return ambiguousUrlWarning(ctx.env, 'postgres', conn(ctx).parts.sourceKey);
   }
 
   protected changeProbeSql(table: string): string {

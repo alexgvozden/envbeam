@@ -10,7 +10,7 @@ import type {
   ToolRequirement,
 } from '../types.js';
 import { SqlDatabaseProvider, firstInt, type DbOverview } from './base.js';
-import { resolveConnection, describeConnection } from './connection.js';
+import { resolveConnection, describeConnection, ambiguousUrlWarning } from './connection.js';
 
 const PART_KEYS = {
   host: ['MYSQL_HOST', 'DB_HOST'],
@@ -88,6 +88,10 @@ export class MysqlProvider extends SqlDatabaseProvider {
 
   connectionSummary(ctx: ProviderContext): string {
     return describeConnection(resolveConnection(ctx, 'mysql', PART_KEYS));
+  }
+
+  ambiguityWarning(ctx: ProviderContext): string | null {
+    return ambiguousUrlWarning(ctx.env, 'mysql', resolveConnection(ctx, 'mysql', PART_KEYS).sourceKey);
   }
 
   protected changeProbeSql(table: string): string {

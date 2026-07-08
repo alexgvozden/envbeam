@@ -7,6 +7,36 @@ export interface DbConnectionParts {
   user?: string;
   password?: string;
   database?: string;
+  /** The env var the URL/connection was resolved from (for ambiguity warnings). */
+  sourceKey?: string;
+}
+
+export type DbEngine = 'postgres' | 'mysql';
+
+export interface DbUrlHit {
+  key: string;
+  engine: DbEngine;
+  /** Redacted for display (no password). */
+  redacted: string;
+}
+
+/**
+ * Find every env var whose value is a database connection URL for a supported
+ * engine — by SCHEME, not by name. Used to warn when a workspace exposes more
+ * than one database of the same engine (envbeam snapshots/restores one).
+ */
+export function findDatabaseUrls(env: Record<string, string | undefined>): DbUrlHit[] {
+  const hits: DbUrlHit[] = [];
+  for (const [key, val] of Object.entries(env)) {
+    if (!val) continue;
+    const engine: DbEngine | null = SCHEME_BY_ENGINE.postgres.test(val)
+      ? 'postgres'
+      : SCHEME_BY_ENGINE.mysql.test(val)
+        ? 'mysql'
+        : null;
+    if (engine) hits.push({ key, engine, redacted: parseDbUrl(val).host ? `${engine}://…@${parseDbUrl(val).host}${parseDbUrl(val).database ? '/' + parseDbUrl(val).database : ''}` : engine });
+  }
+  return hits;
 }
 
 const URL_KEYS_BY_ENGINE: Record<'postgres' | 'mysql', string[]> = {
@@ -93,7 +123,7 @@ export function resolveConnection(
   ];
   for (const key of scanOrder) {
     const val = env[key];
-    if (val && SCHEME_BY_ENGINE[engine].test(val)) return parseDbUrl(val);
+    if (val && SCHEME_BY_ENGINE[engine].test(val)) return { ...parseDbUrl(val), sourceKey: key };
   }
 
   // 2) assemble from parts
@@ -110,6 +140,23 @@ export function resolveConnection(
     password: pick(partKeys.password),
     database: pick(partKeys.database),
   };
+}
+
+/**
+ * A warning to show when a workspace exposes more than one database URL of the
+ * SAME engine — envbeam only snapshots/restores one, so the user should pin
+ * `database.connection` to be explicit. Returns null when unambiguous.
+ */
+export function ambiguousUrlWarning(
+  env: Record<string, string | undefined>,
+  engine: DbEngine,
+  resolvedKey: string | undefined,
+): string | null {
+  const same = findDatabaseUrls(env).filter((h) => h.engine === engine);
+  if (same.length <= 1) return null;
+  const keys = same.map((h) => h.key);
+  const using = resolvedKey ?? keys[0];
+  return `Multiple ${engine} database URLs found (${keys.join(', ')}). envbeam snapshots/restores only one — using ${using}. Set database.connection in .envbeam.yaml to pick a specific one.`;
 }
 
 export function describeConnection(parts: DbConnectionParts): string {
