@@ -280,8 +280,9 @@ export class ClaudeNativeProvider implements SessionProvider {
     if (!target) return { action: 'noop', detail: 'no sync target configured' };
 
     // Choose the newest encrypted archive for this workspace + scope,
-    // preferring one pushed from a different machine.
-    const entries = await target.list(ctx, `claude-session-${workspace}`);
+    // preferring one pushed from a different machine. Uses listNames (raw
+    // prefix match) — target.list() only understands DB-snapshot filenames.
+    const entries = await target.listNames(ctx, `claude-session-${workspace}`);
     const candidates = entries
       .filter((e) => e.name.endsWith('.tar.gz.age'))
       .map((e) => ({ name: e.name, parsed: parseSessionFileName(e.name.replace(/\.age$/, '')) }))

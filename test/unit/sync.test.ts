@@ -76,6 +76,24 @@ describe('local-folder target', () => {
   it('requires a path', () => {
     expect(() => new LocalFolderTarget(syncConfigSchema.parse({ target: 'local-folder' }), 'local-folder')).toThrow(/sync.path/);
   });
+
+  it('listNames matches a raw prefix (finds non-snapshot artifacts like sessions)', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const folder = path.join(dir, 'store');
+    const target = new LocalFolderTarget(syncConfigSchema.parse({ target: 'local-folder', path: folder }), 'local-folder');
+    const ctx = pctx();
+    const src = path.join(dir, 's');
+    await fs.writeFile(src, 'x');
+    // a session archive (NOT snapshot-formatted) + a db snapshot in the same store
+    await target.put(ctx, src, 'claude-session-synthetic-signals-project-mac-2026-07-08T10-14-27.tar.gz.age');
+    await target.put(ctx, src, snapshotName('synthetic-signals', '20260708T000000Z', 'mac', 'sql'));
+
+    // list() (snapshot-aware) drops the session; listNames() finds it by prefix
+    expect((await target.list(ctx, 'synthetic-signals')).some((e) => e.name.includes('claude-session'))).toBe(false);
+    const names = await target.listNames(ctx, 'claude-session-synthetic-signals');
+    expect(names.map((n) => n.name)).toEqual(['claude-session-synthetic-signals-project-mac-2026-07-08T10-14-27.tar.gz.age']);
+  });
 });
 
 describe('s3 target', () => {

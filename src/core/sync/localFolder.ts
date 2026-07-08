@@ -93,6 +93,27 @@ export class LocalFolderTarget implements SyncTarget {
     return sortByTimestampDesc(entries);
   }
 
+  async listNames(_ctx: ProviderContext, namePrefix: string): Promise<Array<{ name: string; sizeBytes?: number }>> {
+    let names: string[];
+    try {
+      names = await fs.readdir(this.dir);
+    } catch {
+      return [];
+    }
+    const out: Array<{ name: string; sizeBytes?: number }> = [];
+    for (const name of names) {
+      if (!name.startsWith(namePrefix)) continue;
+      let sizeBytes: number | undefined;
+      try {
+        sizeBytes = (await fs.stat(this.fullPath(name))).size;
+      } catch {
+        /* ignore */
+      }
+      out.push({ name, sizeBytes });
+    }
+    return out;
+  }
+
   async get(_ctx: ProviderContext, ref: string, localPath: string): Promise<void> {
     await ensureDir(path.dirname(localPath));
     await fs.copyFile(this.fullPath(ref), localPath);

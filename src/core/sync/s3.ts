@@ -132,6 +132,28 @@ export class S3Target implements SyncTarget {
     return sortByTimestampDesc(entries);
   }
 
+  async listNames(ctx: ProviderContext, namePrefix: string): Promise<Array<{ name: string; sizeBytes?: number }>> {
+    const listPrefix = this.prefix ? `${this.prefix}/` : '';
+    const res = await ctx.runner.run(
+      'aws',
+      ['s3api', 'list-objects-v2', '--bucket', this.bucket, '--prefix', `${listPrefix}${namePrefix}`, ...this.baseArgs()],
+      { cwd: ctx.workspaceRoot, allowFailure: true, env: this.awsEnv() },
+    );
+    if (res.code !== 0 || !res.stdout.trim()) return [];
+    let parsed: { Contents?: Array<{ Key?: string; Size?: number }> };
+    try {
+      parsed = JSON.parse(res.stdout);
+    } catch {
+      return [];
+    }
+    const out: Array<{ name: string; sizeBytes?: number }> = [];
+    for (const obj of parsed.Contents ?? []) {
+      if (!obj.Key) continue;
+      out.push({ name: obj.Key.slice(obj.Key.lastIndexOf('/') + 1), sizeBytes: obj.Size });
+    }
+    return out;
+  }
+
   async get(ctx: ProviderContext, ref: string, localPath: string): Promise<void> {
     await ctx.runner.run('aws', ['s3', 'cp', this.uri(ref), localPath, ...this.baseArgs()], {
       cwd: ctx.workspaceRoot,

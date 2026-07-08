@@ -25,6 +25,11 @@ export interface SyncTarget {
   put(ctx: ProviderContext, localFile: string, name: string): Promise<SnapshotEntry>;
   /** List snapshots for the current workspace, most recent first. */
   list(ctx: ProviderContext, workspace: string): Promise<SnapshotEntry[]>;
+  /**
+   * List raw object names starting with `namePrefix` (no snapshot-name parsing).
+   * Used for non-snapshot artifacts like session archives.
+   */
+  listNames(ctx: ProviderContext, namePrefix: string): Promise<Array<{ name: string; sizeBytes?: number }>>;
   /** Download `ref` to `localPath`. */
   get(ctx: ProviderContext, ref: string, localPath: string): Promise<void>;
   /** Delete snapshots beyond the `keep` most recent; returns removed refs. */
