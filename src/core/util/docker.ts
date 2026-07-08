@@ -17,17 +17,38 @@ export async function isDockerDaemonUp(ctx: ProviderContext): Promise<boolean> {
   const res = await ctx.runner.run('docker', ['info', '--format', '{{.ServerVersion}}'], {
     allowFailure: true,
   });
-  const version = res.stdout.trim();
-  return res.code === 0 && version.length > 0 && version !== '<no value>';
+  // Require the output to LOOK like a real server version — it must start with a
+  // digit (e.g. "25.0.3"). Older Docker CLIs (25.x) exit 0 when the daemon is
+  // down and print the error to stdout, or an empty/"<no value>" string — none
+  // of which start with a digit.
+  return /^\d/.test(res.stdout.trim());
 }
 
-/** Best-effort command to launch the Docker daemon for this platform. */
+/**
+ * Best-effort command to launch the Docker daemon for this platform. Runs
+ * automatically — we never ask the user to start Docker themselves.
+ */
 function startDockerCommand(): { command: string; args: string[] } | null {
   switch (os.platform()) {
     case 'darwin':
-      return { command: 'open', args: ['-a', 'Docker'] }; // Docker Desktop.app
+      // Docker Desktop, OrbStack, or colima — whichever is installed. `open -a`
+      // no-ops for absent apps; `colima start` runs only if colima exists.
+      return {
+        command: 'sh',
+        args: [
+          '-c',
+          'open -a Docker 2>/dev/null || open -a OrbStack 2>/dev/null || (command -v colima >/dev/null && colima start) || true',
+        ],
+      };
     case 'win32':
-      return { command: 'cmd', args: ['/c', 'start', '', 'Docker Desktop'] };
+      // Try the standard system-wide and per-user Docker Desktop install paths.
+      return {
+        command: 'cmd',
+        args: [
+          '/c',
+          'start "" "%ProgramFiles%\\Docker\\Docker\\Docker Desktop.exe" || start "" "%LOCALAPPDATA%\\Docker\\Docker Desktop.exe"',
+        ],
+      };
     case 'linux':
       // Try system then user service; needs privileges, so best-effort.
       return {
@@ -47,7 +68,11 @@ function startDockerCommand(): { command: string; args: string[] } | null {
  * found" or "Is the docker daemon running?". Returns true when Docker is usable.
  * No-op in dry-run. Skipped silently on unknown platforms.
  */
-export async function ensureDockerRunning(ctx: ProviderContext, timeoutMs = 120_000): Promise<boolean> {
+export async function ensureDockerRunning(
+  ctx: ProviderContext,
+  timeoutMs = 120_000,
+  force = false,
+): Promise<boolean> {
   // 1) Installed? Install it for the user if not (prompts via ensureTools).
   if (!(await ctx.runner.which('docker'))) {
     if (ctx.dryRun) return true;
@@ -56,8 +81,8 @@ export async function ensureDockerRunning(ctx: ProviderContext, timeoutMs = 120_
     if (!res.allInstalled && !(await ctx.runner.which('docker'))) return false;
   }
 
-  // 2) Daemon up?
-  if (await isDockerDaemonUp(ctx)) return true;
+  // 2) Daemon up? (force = start regardless — the caller saw a real daemon error)
+  if (!force && (await isDockerDaemonUp(ctx))) return true;
   if (ctx.dryRun) return true;
 
   const start = startDockerCommand();

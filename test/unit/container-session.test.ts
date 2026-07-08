@@ -63,16 +63,21 @@ describe('ensureDockerRunning (self-heal)', () => {
     expect(await ensureDockerRunning(ctxWith(runner), 100)).toBe(false);
   });
 
-  it('treats exit-0-but-empty `docker info` as daemon DOWN (docker 25.x quirk) and tries to start it', async () => {
-    const runner = new FakeRunner({ available: ['docker'] });
-    // docker 25.x: exits 0 with empty stdout (error on stderr) when the daemon is down
-    runner.on('docker info', { code: 0, stdout: '', stderr: 'Cannot connect to the Docker daemon' });
-    runner.on('open', {});
-    runner.on('sh', {});
-    runner.on('cmd', {});
-    expect(await ensureDockerRunning(ctxWith(runner), 100)).toBe(false);
-    // the old code returned true immediately here; now it recognizes down and attempts a start
-    expect(runner.calls.some((c) => ['open', 'sh', 'cmd'].includes(c.command))).toBe(true);
+  it('treats non-version `docker info` output as daemon DOWN (docker 25.x quirks) and tries to start it', async () => {
+    for (const quirk of [
+      { code: 0, stdout: '', stderr: 'Cannot connect to the Docker daemon' }, // empty
+      { code: 0, stdout: 'Cannot connect to the Docker daemon', stderr: '' }, // error on stdout
+      { code: 0, stdout: '<no value>', stderr: '' }, // template rendered nil
+    ]) {
+      const runner = new FakeRunner({ available: ['docker'] });
+      runner.on('docker info', quirk);
+      runner.on('open', {});
+      runner.on('sh', {});
+      runner.on('cmd', {});
+      expect(await ensureDockerRunning(ctxWith(runner), 100)).toBe(false);
+      // old code returned true immediately; now it recognizes DOWN and attempts a start
+      expect(runner.calls.some((c) => ['open', 'sh', 'cmd'].includes(c.command))).toBe(true);
+    }
   });
 });
 

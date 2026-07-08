@@ -50,9 +50,10 @@ export interface CommandRunner {
 
 /**
  * When on, RealCommandRunner traces every external command + exit code to
- * stderr. Toggled by `--verbose` so users can see exactly what envbeam runs.
+ * stderr. Toggled by `--verbose`, or by `ENVBEAM_TRACE=1` from process start
+ * (handy for verifying a deployed build and for non-interactive debugging).
  */
-let COMMAND_TRACE = false;
+let COMMAND_TRACE = ['1', 'true'].includes(process.env.ENVBEAM_TRACE ?? '');
 export function setCommandTrace(on: boolean): void {
   COMMAND_TRACE = on;
 }

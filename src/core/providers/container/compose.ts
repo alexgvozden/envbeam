@@ -27,6 +27,11 @@ function composeArgs(file: string, rest: string[]): string[] {
   return ['compose', '-f', file, ...rest];
 }
 
+/** True when a command failed specifically because the Docker daemon is down. */
+function isDaemonError(stderr: string): boolean {
+  return /cannot connect to the docker daemon|is the docker daemon running|docker daemon/i.test(stderr);
+}
+
 export class ComposeContainerProvider implements ContainerProvider {
   readonly name = 'compose';
   readonly kind = 'container' as const;
@@ -51,13 +56,29 @@ export class ComposeContainerProvider implements ContainerProvider {
       ctx.logger.sub(`would run: docker compose -f ${path.relative(ctx.workspaceRoot, file)} ${rest.join(' ')}`);
       return this.status(ctx);
     }
-    if (!(await ensureDockerRunning(ctx))) {
-      throw new EnvbeamError('Docker daemon is not running and could not be started.', {
-        exitCode: 2,
-        hint: 'Start Docker Desktop (or the docker service), then re-run.',
+    // Proactively make sure Docker is installed + running.
+    await ensureDockerRunning(ctx);
+
+    let res = await ctx.runner.run('docker', composeArgs(file, rest), {
+      cwd: ctx.workspaceRoot,
+      allowFailure: true,
+    });
+    // Reactive backstop: if the daemon really was down (the check can be fooled
+    // on some CLIs), the error says so — start Docker and retry once.
+    if (res.code !== 0 && isDaemonError(res.stderr)) {
+      ctx.logger.sub('Docker daemon unavailable — starting Docker and retrying…');
+      await ensureDockerRunning(ctx, 120_000, true); // force: we saw a real daemon error
+      res = await ctx.runner.run('docker', composeArgs(file, rest), {
+        cwd: ctx.workspaceRoot,
+        allowFailure: true,
       });
     }
-    await ctx.runner.run('docker', composeArgs(file, rest), { cwd: ctx.workspaceRoot });
+    if (res.code !== 0) {
+      throw new EnvbeamError(`docker compose up failed: ${res.stderr.trim() || res.stdout.trim()}`, {
+        exitCode: 2,
+        hint: 'Ensure Docker is running (Docker Desktop / colima / OrbStack), then re-run.',
+      });
+    }
     return this.status(ctx);
   }
 

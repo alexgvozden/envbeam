@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.4] - 2026-07-08
+
+### Fixed
+- **Docker now actually starts itself (macOS + Windows), no user action** — the daemon check now treats any non-version `docker info` output as "down" (docker 25.x prints the connect error to stdout and exits 0, which fooled the previous check), so envbeam reliably detects a stopped daemon and launches it. macOS tries Docker Desktop → OrbStack → colima; Windows tries the system-wide and per-user Docker Desktop paths; Linux starts the docker service. A reactive backstop also retries `compose up` after force-starting Docker if the daemon error still surfaces. No prompt, no waiting on the user.
+
+### Added
+- **`ENVBEAM_TRACE=1` also enables command tracing** — same output as `--verbose` but from process start and independent of flag position, so you can verify a deployed build (`ENVBEAM_TRACE=1 envbeam list`) and debug non-interactively.
+
 ## [0.11.3] - 2026-07-08
 
 ### Added
