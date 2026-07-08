@@ -84,9 +84,13 @@ function gather(ctx: RunContext): ProviderEntry[] {
 }
 
 /** Run doctor-style checks for every tool the active providers need (PRD §8/§9). */
-export async function runPreflight(ctx: RunContext, opts: { auth?: boolean } = {}): Promise<PreflightReport> {
+export async function runPreflight(
+  ctx: RunContext,
+  opts: { auth?: boolean; skipAuthFor?: ProviderKind[] } = {},
+): Promise<PreflightReport> {
   const checks: ToolCheck[] = [];
   const seen = new Set<string>();
+  const skipAuth = new Set(opts.skipAuthFor ?? []);
 
   for (const entry of gather(ctx)) {
     const reqs = entry.provider.requiredTools(entry.pctx);
@@ -94,7 +98,11 @@ export async function runPreflight(ctx: RunContext, opts: { auth?: boolean } = {
       const key = `${req.command}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      checks.push(await checkTool(ctx, entry.concern, entry.pctx, req, opts.auth ?? true));
+      // Some concerns (e.g. database connectivity) can't be checked yet on
+      // resume — secrets aren't materialized and the container isn't up. Skip
+      // their auth probe; presence is still verified.
+      const doAuth = (opts.auth ?? true) && !skipAuth.has(entry.concern);
+      checks.push(await checkTool(ctx, entry.concern, entry.pctx, req, doAuth));
     }
   }
 

@@ -9,6 +9,7 @@ import { loadState, patchState } from '../state.js';
 import { createSyncTarget, encryptionSuffix, decryptFile, type SnapshotEntry } from '../sync/index.js';
 import { PreflightError } from '../util/errors.js';
 import { ensureTools } from '../util/tools.js';
+import { ensureDockerRunning } from '../util/docker.js';
 import { sessionSummary } from './format.js';
 import type { GitPullResult, MaterializeResult, ContainerStatus } from '../providers/types.js';
 
@@ -70,7 +71,17 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
     }
   }
 
-  const pre = await runPreflight(ctx, { auth: true });
+  // If we'll bring a container up, self-heal Docker BEFORE preflight — otherwise
+  // the daemon check would hard-block here, before container.up() could start it.
+  const willStartContainer = !!active.container && ctx.config.container?.upOnResume !== false;
+  if (!ctx.dryRun && willStartContainer) {
+    await ensureDockerRunning(ctx.providerCtx('container'));
+  }
+
+  // Skip the database connectivity probe: on resume the DB can't be reached yet
+  // (secrets not materialized, container not up). It's validated after, once the
+  // container is up and secrets are written (see waitForDbReady).
+  const pre = await runPreflight(ctx, { auth: true, skipAuthFor: ['database'] });
   const blockers = blockingProblems(ctx, pre.checks);
   for (const c of pre.checks) {
     if (!c.present) log.sub(pc.red(`✗ ${c.command} not found (${c.concern}) — ${c.installHint}`));
@@ -121,8 +132,7 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
   }
 
   // 5. Container
-  const containerStarted = active.container && ctx.config.container?.upOnResume !== false;
-  if (containerStarted) {
+  if (willStartContainer) {
     log.step('Container');
     const status = await active.container!.up(ctx.providerCtx('container'));
     report.container = status;
@@ -134,7 +144,7 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
     log.step('Database');
     // If we just started the container, the DB may need a moment to accept
     // connections before migrations/restore — wait for it (best-effort).
-    if (containerStarted && active.database && !ctx.dryRun) {
+    if (willStartContainer && active.database && !ctx.dryRun) {
       await waitForDbReady(ctx, active.database);
     }
     report.database = await resumeDatabase(ctx, active);
