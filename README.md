@@ -55,8 +55,10 @@ There is **no envbeam backend**. Everything runs locally and flows only through 
 
 ## Install
 
+`envbeam` isn't on the public npm registry yet — install it straight from the git repo:
+
 ```bash
-npm install -g envbeam
+npm install -g "git+ssh://git@github.com/alexgvozden/envbeam.git#main"
 ```
 
 Requires **Node ≥ 18**. `envbeam` shells out to the CLIs of whatever providers you use (`git`, `docker`, `doppler`/`op`, `pg_dump`/`mysqldump`, `claude-sync`, …). Missing a tool? `envbeam` **installs it for you** on demand — or run `envbeam doctor` to see the full picture up front.
