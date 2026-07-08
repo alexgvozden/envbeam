@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-07-08
+
+### Changed
+- **Database snapshots are now encrypted at rest by default** — previously `sync.encrypt` defaulted to `none`, so a full DB dump (potentially your entire dataset) uploaded in plaintext, while sessions were always encrypted. Now, when age keys are available (they're set up as part of session sync / `envbeam storage setup`), snapshots are age-encrypted by default — no config needed. An explicit `sync.encrypt` still wins; if no keys exist, envbeam warns that the snapshot is stored unencrypted rather than failing. Restore now detects encryption from the **file extension** (`.age`/`.gpg`), so it decrypts correctly regardless of local config, auto-installing `age` and fetching keys from Doppler as needed.
+
+### Added
+- **Post-restore session hint** — after `pull`/`resume` restores Claude sessions, envbeam tells you how to use them: *"Your Claude sessions are restored — run `claude --resume` in this project to pick one up."*
+
 ## [0.13.3] - 2026-07-08
 
 ### Fixed

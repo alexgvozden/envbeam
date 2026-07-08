@@ -189,4 +189,31 @@ describe('encrypted snapshot round trip (fake age)', () => {
     const state = await loadState(dir);
     expect(state.lastRestoredTimestamp).toBeTruthy();
   });
+
+  it('encrypts by default with age when keys are available (no explicit sync.encrypt)', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const syncDir = path.join(home, 'snaps');
+    const runner = baseRunner();
+    runner.available('age');
+    runner.on('age', (_c, a) => {
+      const o = a.indexOf('-o');
+      if (o < 0) return { stdout: 'age 1.0' };
+      copyFileSync(a[a.length - 1]!, a[o + 1]!);
+      return {};
+    });
+    process.env.ENVBEAM_AGE_PUBLIC_KEY = 'age1testpub';
+    process.env.ENVBEAM_AGE_PRIVATE_KEY = 'AGE-SECRET-KEY-test';
+    try {
+      const sync = { target: 'local-folder', path: syncDir, keep: 5 }; // no encrypt field
+      const report = await runPause(await ctxOn(dir, runner, snapConfig(sync)), { force: false, snapshot: true, workMode: 'none' });
+      expect(report.database?.snapshot?.file.endsWith('.age')).toBe(true);
+      const files = await fs.readdir(syncDir);
+      expect(files.length).toBeGreaterThan(0);
+      expect(files.every((f) => f.endsWith('.age'))).toBe(true);
+    } finally {
+      delete process.env.ENVBEAM_AGE_PUBLIC_KEY;
+      delete process.env.ENVBEAM_AGE_PRIVATE_KEY;
+    }
+  });
 });

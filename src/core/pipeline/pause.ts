@@ -9,6 +9,7 @@ import {
   createSyncTarget,
   encryptionSuffix,
   encryptFile,
+  ensureAgeKeys,
   formatTimestamp,
   snapshotName,
 } from '../sync/index.js';
@@ -277,15 +278,36 @@ async function pauseDatabase(
     return out;
   }
 
-  // optional encryption
+  // Encrypt at rest. Snapshots carry the whole database, so — like sessions —
+  // default to age encryption when keys are available (secure by default);
+  // honor an explicit sync.encrypt otherwise.
   const target = createSyncTarget(db.sync, ctx.identities.sync);
-  const suffix = encryptionSuffix(db.sync);
+  let cryptoCfg = db.sync;
+  if (!cryptoCfg.encrypt || cryptoCfg.encrypt === 'none') {
+    const keys = await ensureAgeKeys(dctx);
+    if (keys.pub) cryptoCfg = { ...cryptoCfg, encrypt: 'age' };
+  } else if (cryptoCfg.encrypt === 'age') {
+    await ensureAgeKeys(dctx);
+  }
+
+  const suffix = encryptionSuffix(cryptoCfg);
   let uploadFile = result.file;
   let uploadName = path.basename(result.file);
+  let encryptedFile: string | null = null;
   if (suffix) {
-    uploadFile = result.file + suffix;
-    uploadName += suffix;
-    await encryptFile(dctx, db.sync, result.file, uploadFile);
+    const tool = cryptoCfg.encrypt === 'gpg' ? 'gpg' : 'age';
+    const t = await ensureTools([tool], dctx.runner, dctx.logger, dctx.prompter);
+    if (t.allInstalled) {
+      uploadFile = result.file + suffix;
+      uploadName += suffix;
+      encryptedFile = uploadFile;
+      await encryptFile(dctx, cryptoCfg, result.file, uploadFile);
+      log.sub(`snapshot encrypted (${cryptoCfg.encrypt})`);
+    } else {
+      log.warn(`${tool} unavailable — snapshot stored UNENCRYPTED`);
+    }
+  } else {
+    log.warn('snapshot stored UNENCRYPTED — run `envbeam session setup` to generate age keys for at-rest encryption');
   }
 
   const entry = await target.put(dctx, uploadFile, uploadName);
@@ -295,7 +317,7 @@ async function pauseDatabase(
   // record + cleanup local artifacts
   await patchState(ctx.workspaceRoot, { lastSnapshotTimestamp: timestamp });
   await fs.rm(result.file, { force: true }).catch(() => undefined);
-  if (suffix) await fs.rm(uploadFile, { force: true }).catch(() => undefined);
+  if (encryptedFile) await fs.rm(encryptedFile, { force: true }).catch(() => undefined);
 
   out.snapshot = { timestamp, file: entry.name, sizeBytes: result.sizeBytes };
   log.sub(`snapshot pushed → ${entry.name} (${sizeMB.toFixed(1)}MB)`);

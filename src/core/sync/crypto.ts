@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs';
 import type { ProviderContext } from '../providers/types.js';
 import type { SyncConfig } from '../config/schema.js';
 import { EnvbeamError } from '../util/errors.js';
+import { getGlobalEncryptionConfig, injectEncryptionEnv } from '../storage/global.js';
 
 /**
  * At-rest encryption for snapshot files. Wraps the `age` or `gpg` CLI; envbeam
@@ -13,6 +14,25 @@ import { EnvbeamError } from '../util/errors.js';
 export function encryptionSuffix(cfg: SyncConfig | undefined): string {
   if (!cfg || cfg.encrypt === 'none') return '';
   return cfg.encrypt === 'age' ? '.age' : '.gpg';
+}
+
+/** Encryption implied by a stored file's extension (source of truth on restore). */
+export function detectEncryptFromName(name: string): 'age' | 'gpg' | 'none' {
+  if (name.endsWith('.age')) return 'age';
+  if (name.endsWith('.gpg')) return 'gpg';
+  return 'none';
+}
+
+/**
+ * Ensure age keys are present in the environment, fetching them from the global
+ * Doppler config if needed. Returns which halves are available.
+ */
+export async function ensureAgeKeys(ctx: ProviderContext): Promise<{ pub: boolean; priv: boolean }> {
+  if (!process.env.ENVBEAM_AGE_PUBLIC_KEY || !process.env.ENVBEAM_AGE_PRIVATE_KEY) {
+    const cfg = await getGlobalEncryptionConfig(ctx.runner);
+    if (cfg) injectEncryptionEnv(cfg);
+  }
+  return { pub: !!process.env.ENVBEAM_AGE_PUBLIC_KEY, priv: !!process.env.ENVBEAM_AGE_PRIVATE_KEY };
 }
 
 /**

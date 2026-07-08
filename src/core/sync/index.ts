@@ -6,7 +6,14 @@ import { LocalFolderTarget } from './localFolder.js';
 import { S3Target } from './s3.js';
 
 export * from './types.js';
-export { encryptionSuffix, encryptFile, decryptFile, requiredCryptoTools } from './crypto.js';
+export {
+  encryptionSuffix,
+  encryptFile,
+  decryptFile,
+  requiredCryptoTools,
+  detectEncryptFromName,
+  ensureAgeKeys,
+} from './crypto.js';
 
 /** Build the configured sync target, resolving the identity where relevant. */
 export function createSyncTarget(cfg: SyncConfig, identity?: ResolvedIdentity): SyncTarget {

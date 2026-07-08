@@ -6,8 +6,14 @@ import { resolveActiveProviders } from './providers.js';
 import { runPreflight, assertSecretsAuth, type ToolCheck } from './preflight.js';
 import { runMigrateCommand } from '../providers/database/migrate.js';
 import { loadState, patchState } from '../state.js';
-import { createSyncTarget, encryptionSuffix, decryptFile, type SnapshotEntry } from '../sync/index.js';
-import { PreflightError } from '../util/errors.js';
+import {
+  createSyncTarget,
+  decryptFile,
+  detectEncryptFromName,
+  ensureAgeKeys,
+  type SnapshotEntry,
+} from '../sync/index.js';
+import { PreflightError, EnvbeamError } from '../util/errors.js';
 import { ensureTools } from '../util/tools.js';
 import { ensureDockerRunning } from '../util/docker.js';
 import { installRuntimeDeps, type DepsReport } from './deps.js';
@@ -136,6 +142,9 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
       const res = await active.session.pull(ctx.providerCtx('session'));
       report.session = { action: res.action, detail: res.detail };
       log.sub(res.detail ?? res.action);
+      if (res.action === 'pulled') {
+        log.hint('Your Claude sessions are restored — run `claude --resume` in this project to pick one up.');
+      }
     } catch (e) {
       report.session = { action: 'noop', detail: `session pull failed: ${(e as Error).message}` };
       log.warn(`session pull failed (continuing): ${(e as Error).message}`);
@@ -270,11 +279,22 @@ async function downloadAndRestore(
   const downloaded = path.join(work, entry.name);
   await target.get(dctx, entry.ref, downloaded);
 
+  // Decryption is driven by the FILE's extension, not config — so a snapshot
+  // encrypted by default (age) still restores even if the local config differs.
   let restoreFile = downloaded;
-  const suffix = encryptionSuffix(db.sync);
-  if (suffix && entry.name.endsWith(suffix)) {
-    restoreFile = downloaded.slice(0, -suffix.length);
-    await decryptFile(dctx, db.sync!, downloaded, restoreFile);
+  const enc = detectEncryptFromName(entry.name);
+  if (enc !== 'none') {
+    await ensureAgeKeys(dctx);
+    const t = await ensureTools([enc === 'gpg' ? 'gpg' : 'age'], dctx.runner, dctx.logger, dctx.prompter);
+    if (!t.allInstalled) {
+      throw new EnvbeamError(`snapshot is ${enc}-encrypted but ${enc} is not installed`, {
+        exitCode: 2,
+        hint: `Install ${enc} to decrypt the database snapshot.`,
+      });
+    }
+    restoreFile = downloaded.slice(0, -4); // '.age' / '.gpg'
+    await decryptFile(dctx, { ...db.sync!, encrypt: enc }, downloaded, restoreFile);
+    ctx.logger.sub('snapshot decrypted');
   }
 
   await active.database!.restore(dctx, restoreFile);
