@@ -11,6 +11,7 @@ import {
   decryptFile,
   detectEncryptFromName,
   ensureAgeKeys,
+  verifyArtifact,
   type SnapshotEntry,
 } from '../sync/index.js';
 import { PreflightError, EnvbeamError } from '../util/errors.js';
@@ -280,6 +281,20 @@ async function downloadAndRestore(
   await fs.mkdir(work, { recursive: true });
   const downloaded = path.join(work, entry.name);
   await target.get(dctx, entry.ref, downloaded);
+
+  // Verify the downloaded snapshot against the Doppler-anchored hash before
+  // restoring it into the database. A mismatch = tampered/replaced in the bucket.
+  const verdict = await verifyArtifact(ctx.runner, ctx.config.workspace, entry.name, downloaded);
+  if (verdict === 'mismatch') {
+    await fs.rm(work, { recursive: true, force: true }).catch(() => undefined);
+    throw new EnvbeamError('refusing to restore: database snapshot failed integrity check (Doppler hash mismatch)', {
+      exitCode: 2,
+      hint: 'The snapshot in storage does not match the recorded hash — it may have been tampered with.',
+    });
+  }
+  if (verdict === 'missing') {
+    ctx.logger.sub('no integrity hash on record for this snapshot — cannot verify it was not tampered');
+  }
 
   // Decryption is driven by the FILE's extension, not config — so a snapshot
   // encrypted by default (age) still restores even if the local config differs.

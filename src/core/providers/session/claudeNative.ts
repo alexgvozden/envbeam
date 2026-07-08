@@ -11,7 +11,7 @@ import type {
 } from '../types.js';
 import type { ProviderFactory } from '../registry.js';
 import type { SyncConfig } from '../../config/schema.js';
-import { createSyncTarget, encryptFile, decryptFile } from '../../sync/index.js';
+import { createSyncTarget, encryptFile, decryptFile, sha256File, recordArtifactHash, verifyArtifact } from '../../sync/index.js';
 import {
   getGlobalStorageConfig,
   injectStorageEnv,
@@ -293,15 +293,28 @@ export class ClaudeNativeProvider implements SessionProvider {
       await encryptFile(ctx, encryptedConfig, archivePath, uploadPath);
       ctx.logger.sub('session encrypted');
 
-      // Upload metadata separately (not encrypted — contains no sensitive data)
+      // Upload metadata separately (not encrypted, but hashed below so tamper
+      // is detectable — see the integrity manifest).
       const metaArchiveName = archiveName.replace('.tar.gz', '.meta.json');
       try {
         await target.put(ctx, uploadPath, uploadName);
         await target.put(ctx, metadataPath, metaArchiveName);
-        return { action: 'pushed', detail: `${scope} session pushed (encrypted with age)` };
       } catch (e) {
         return { action: 'noop', detail: `upload failed: ${(e as Error).message}` };
       }
+
+      // Anchor integrity in Doppler: record sha256 of the encrypted archive AND
+      // the plaintext metadata, pruning to what's still on the target.
+      const live = new Set(
+        (await target.listNames(ctx, `claude-session-${workspace}`).catch(() => [])).map((e) => e.name),
+      );
+      const recorded =
+        (await recordArtifactHash(ctx.runner, workspace, uploadName, await sha256File(uploadPath), live)) &&
+        (await recordArtifactHash(ctx.runner, workspace, metaArchiveName, await sha256File(metadataPath), live));
+      if (recorded) ctx.logger.sub(pc.dim('integrity hash recorded'));
+      else ctx.logger.warn('could not record integrity hash in Doppler — restore cannot verify this archive');
+
+      return { action: 'pushed', detail: `${scope} session pushed (encrypted with age)` };
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     }
@@ -364,16 +377,32 @@ export class ClaudeNativeProvider implements SessionProvider {
         return { action: 'noop', detail: `download failed: ${(e as Error).message}` };
       }
 
+      // Verify the encrypted archive against the Doppler-anchored hash BEFORE
+      // decrypting. A mismatch means the bucket object was tampered/replaced.
+      const verdict = await verifyArtifact(ctx.runner, workspace, chosen.name, downloadPath);
+      if (verdict === 'mismatch') {
+        return { action: 'noop', detail: 'refusing to restore: session archive failed integrity check (Doppler hash mismatch)' };
+      }
+      if (verdict === 'missing') {
+        ctx.logger.warn('no integrity hash on record for this archive — cannot verify it was not tampered');
+      }
+
       const decryptConfig: SyncConfig = { ...syncConfig, encrypt: 'age' };
       await decryptFile(ctx, decryptConfig, downloadPath, archivePath);
       await fs.rm(downloadPath, { force: true });
       ctx.logger.sub('session decrypted');
 
-      // Metadata (optional): records the source machine's workspace path.
+      // Metadata (optional): records the source machine's workspace path. It's
+      // plaintext, so only trust it if its integrity hash also verifies.
       let metadata: { workspaceRoot?: string } = {};
+      const metaName = archiveBase.replace('.tar.gz', '.meta.json');
       try {
-        await target.get(ctx, archiveBase.replace('.tar.gz', '.meta.json'), metaPath);
-        metadata = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+        await target.get(ctx, metaName, metaPath);
+        if ((await verifyArtifact(ctx.runner, workspace, metaName, metaPath)) !== 'mismatch') {
+          metadata = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+        } else {
+          ctx.logger.warn('session metadata failed integrity check — ignoring it (paths won’t be translated)');
+        }
       } catch {
         /* metadata optional */
       }

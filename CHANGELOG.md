@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-07-08
+
+### Security
+- **Doppler-anchored integrity hashes for backups** — on `push`, envbeam records the `sha256` of every uploaded artifact (encrypted DB snapshot, encrypted session archive, and the session metadata) in a per-workspace manifest secret in the **Doppler `envbeam-global` project** — a different trust domain than the storage bucket. On `pull`/`resume` it verifies the downloaded artifact against that hash **before** decrypting/restoring and **refuses** on mismatch. So tampering with or rolling back a bucket object is now detectable unless the attacker also has Doppler write access (and age already makes tampering-without-the-key fail on decrypt). The plaintext session metadata is now hash-verified too, so a bad `workspaceRoot` can't drive path translation. The manifest is pruned to what's still on the sync target, and a missing hash (artifact pushed before this version, or Doppler unavailable) warns rather than blocking.
+
 ## [0.15.0] - 2026-07-08
 
 ### Added

@@ -12,6 +12,8 @@ import {
   ensureAgeKeys,
   formatTimestamp,
   snapshotName,
+  recordArtifactHash,
+  sha256File,
 } from '../sync/index.js';
 import { PreflightError } from '../util/errors.js';
 import { assertSecretsAuth } from './preflight.js';
@@ -321,6 +323,12 @@ async function pauseDatabase(
     const entry = await target.put(dctx, uploadFile, uploadName);
     const pruned = await target.prune(dctx, ctx.config.workspace, db.sync.keep ?? 5);
     if (pruned.length) log.sub(`pruned ${pruned.length} old snapshot(s)`);
+
+    // Anchor snapshot integrity in Doppler (separate trust domain from the
+    // bucket), pruning manifest entries for snapshots that no longer exist.
+    const live = new Set((await target.list(dctx, ctx.config.workspace).catch(() => [])).map((e) => e.name));
+    const ok = await recordArtifactHash(dctx.runner, ctx.config.workspace, uploadName, await sha256File(uploadFile), live);
+    if (!ok) log.warn('could not record snapshot integrity hash in Doppler — restore cannot verify this snapshot');
 
     await patchState(ctx.workspaceRoot, { lastSnapshotTimestamp: timestamp });
     out.snapshot = { timestamp, file: entry.name, sizeBytes: result.sizeBytes };

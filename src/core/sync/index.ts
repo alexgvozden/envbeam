@@ -14,6 +14,7 @@ export {
   detectEncryptFromName,
   ensureAgeKeys,
 } from './crypto.js';
+export { sha256File, readManifest, recordArtifactHash, verifyArtifact, type VerifyResult } from './integrity.js';
 
 /** Build the configured sync target, resolving the identity where relevant. */
 export function createSyncTarget(cfg: SyncConfig, identity?: ResolvedIdentity): SyncTarget {
