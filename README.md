@@ -16,9 +16,9 @@ envbeam push     # hand off this machine
 envbeam pull     # pick up where you left off on the other one
 ```
 
-> `push` and `pull` are the command names. `pause` and `resume` are aliases for the same two commands — use whichever reads better to you.
+> `pause` and `resume` are exact aliases for `push` and `pull` — use whichever reads better to you.
 
-**Contents** · [What it moves](#what-it-moves) · [How it works](#how-it-works) · [Install](#install) · [Quick start](#quick-start) · [The two commands](#the-two-commands) · [All commands](#all-commands) · [Supported platforms](#supported-platforms) · [Configuration](#configuration) · [Guarantees](#guarantees) · [Development](#development)
+**Contents** · [What it moves](#what-it-moves) · [How it works](#how-it-works) · [Install](#install) · [Quick start](#quick-start) · [Push here, pull there](#push-here-pull-there) · [All commands](#all-commands) · [Supported platforms](#supported-platforms) · [Configuration](#configuration) · [Guarantees](#guarantees) · [Development](#development)
 
 ---
 
@@ -85,18 +85,52 @@ cd my-project
 envbeam init      # scaffold .envbeam.yaml — auto-detects git, container, DB, secrets
 envbeam doctor    # verify tools + auth, and show what was detected
 
-envbeam push      # hand off: commit & push, snapshot DB, push session
+envbeam push --commit -m "wip"   # hand off: commit & push, snapshot DB, sync session
 # … then on the other machine …
-envbeam pull      # pick up: branch, secrets, container, DB, session — all restored
+envbeam pull                     # pick up: branch, secrets, container, DB, session
 ```
 
-That's the whole happy path. `init` detects your git account automatically, so most single-account setups need no further configuration. Juggling work + personal accounts? See [Identities](#identities-multi-account).
+That's the whole happy path — `init` detects your git account automatically, so most single-account setups need no extra configuration.
+
+- **Work + personal accounts?** Route each concern to the right one — see [Identities](#identities-multi-account).
+- **Want database snapshots and your Claude session to travel too** (not just code + secrets)? Run `envbeam storage setup` once — see [Global storage](#global-storage).
 
 ---
 
-## The two commands
+## Push here, pull there
 
-### `envbeam pull` — get this machine ready to work
+These two commands *are* the tool, and they're a round trip. On the machine you're **leaving**, run `push` to hand everything off. On the machine you're **arriving at**, run `pull` to pick up exactly where you left off. Same two commands, every time.
+
+Think bigger than `git push` / `git pull`: these move your *entire machine state* — code, secrets, container, database, and Claude session — not just commits.
+
+### `envbeam push` — hand off this machine
+
+*(alias: `envbeam pause`)*
+
+```console
+$ envbeam push --commit -m "wip: checkout flow"
+▸ 1. Git
+    2 uncommitted file(s)
+    committed working changes
+    pushed main → origin (4 commits)
+▸ 2. Database
+    orders changed (+128 rows) since last push
+    snapshot encrypted (age)
+    snapshot pushed → my-app-2026-07-08T15-04-22Z.sql.age (3.2MB)
+▸ 3. Session
+    pushed 2 session(s)
+▸ 4. Secrets
+    not pushed (provider is source of truth)
+▸ 5. Report
+    git:       main — committed, pushed
+    database:  snapshot 2026-07-08T15-04-22Z uploaded
+    session:   synced
+✓ Safe to switch machines.
+```
+
+It **refuses to drop uncommitted work** without `--commit`, `--stash`, or `--force`, and snapshots the database only when the data actually changed (`--snapshot` forces one). Secrets aren't pushed — your provider stays the source of truth.
+
+### `envbeam pull` — pick up on the new machine
 
 *(alias: `envbeam resume`)*
 
@@ -127,34 +161,7 @@ $ envbeam pull
 ✓ Ready to work.
 ```
 
-Fetches & fast-forwards git (never clobbering uncommitted work), pulls secrets into a gitignored `.env`, restores your Claude session, brings the container up, applies migrations, and offers to restore a newer DB snapshot.
-
-### `envbeam push` — safely hand off this machine
-
-*(alias: `envbeam pause`)*
-
-```console
-$ envbeam push --commit -m "wip: checkout flow"
-▸ 1. Git
-    2 uncommitted file(s)
-    committed working changes
-    pushed main → origin (4 commits)
-▸ 2. Database
-    orders changed (+128 rows) since last push
-    snapshot encrypted (age)
-    snapshot pushed → my-app-2026-07-08T15-04-22Z.sql.age (3.2MB)
-▸ 3. Session
-    pushed 2 session(s)
-▸ 4. Secrets
-    not pushed (provider is source of truth)
-▸ 5. Report
-    git:       main — committed, pushed
-    database:  snapshot 2026-07-08T15-04-22Z uploaded
-    session:   synced
-✓ Safe to switch machines.
-```
-
-Surfaces uncommitted/unpushed work (`--commit` or `--stash`, then push — **refuses to drop work** without `--force`), snapshots the DB only when it changed (or `--snapshot` to force), and pushes your Claude session. Secrets aren't pushed by default — your provider is the source of truth.
+`pull` only **fast-forwards** — if your branch has diverged or the working tree is dirty, it stops and leaves your work untouched instead of clobbering it. A newer database snapshot is *offered*, never forced.
 
 > Both commands support `--dry-run` to preview every action without changing anything.
 
@@ -166,8 +173,8 @@ Everyday work:
 
 | Command | What it does |
 |---|---|
-| [`envbeam pull`](#envbeam-pull--get-this-machine-ready-to-work) · `resume` | Pull state and get ready to work. |
-| [`envbeam push`](#envbeam-push--safely-hand-off-this-machine) · `pause` | Push state so you can switch machines. |
+| [`envbeam push`](#envbeam-push--hand-off-this-machine) · `pause` | Hand off this machine: commit & push, snapshot DB, sync session. |
+| [`envbeam pull`](#envbeam-pull--pick-up-on-the-new-machine) · `resume` | Pick up on another machine: branch, secrets, container, DB, session. |
 | [`envbeam status`](#status--doctor) | Read-only view of git/secrets/container/DB/session. `--json` for scripts. |
 
 Setup & health:
