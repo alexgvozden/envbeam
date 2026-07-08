@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import pc from 'picocolors';
+import { redactUrlCreds } from './redact.js';
 
 export interface RunOptions {
   /** Working directory for the command. */
@@ -59,7 +60,11 @@ export function setCommandTrace(on: boolean): void {
 }
 
 function traceStart(command: string, args: string[]): void {
-  if (COMMAND_TRACE) process.stderr.write(pc.dim(`  $ ${[command, ...args].join(' ')}`) + '\n');
+  // Redact credentials embedded in URL args (e.g. postgres://u:pw@h, token git
+  // remotes) so a --verbose / ENVBEAM_TRACE run never prints secrets.
+  if (COMMAND_TRACE) {
+    process.stderr.write(pc.dim(`  $ ${[command, ...args].map(redactUrlCreds).join(' ')}`) + '\n');
+  }
 }
 function traceEnd(command: string, code: number, stderr: string): void {
   if (!COMMAND_TRACE) return;
@@ -70,7 +75,7 @@ function traceEnd(command: string, code: number, stderr: string): void {
     const lines = stderr.trim().split(/\r?\n/).filter(Boolean);
     summary = lines.find((l) => /error|failed|denied|cannot|fatal|refused/i.test(l)) ?? lines[0] ?? '';
   }
-  process.stderr.write(pc.dim(`    → exit ${code}${summary ? `: ${summary}` : ''}`) + '\n');
+  process.stderr.write(pc.dim(`    → exit ${code}${summary ? `: ${redactUrlCreds(summary)}` : ''}`) + '\n');
 }
 
 export class RealCommandRunner implements CommandRunner {

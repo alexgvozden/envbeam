@@ -92,17 +92,8 @@ export abstract class SqlDatabaseProvider implements DatabaseProvider {
     }
     const parts: string[] = [];
 
-    // Whole-DB signal (size + approx rows) — always, so detection works even
-    // with no change-detection tables configured.
-    let overview: DbOverview | null = null;
-    try {
-      overview = await this.databaseOverview(ctx);
-    } catch {
-      overview = null;
-    }
-    if (overview) parts.push(`size:${overview.sizeBytes}`, `rows:${overview.rows}`);
-
-    // Exact per-table counts when the user pinned specific tables.
+    // Exact per-table counts when the user pinned specific tables — these are
+    // stable signals and are the sole fingerprint basis when present.
     const tables = this.changeTables(ctx);
     for (const t of tables) {
       try {
@@ -111,6 +102,21 @@ export abstract class SqlDatabaseProvider implements DatabaseProvider {
       } catch {
         parts.push(`${t}:err`);
       }
+    }
+
+    // Whole-DB signal (size + approx rows) — used ONLY as a zero-config
+    // fallback. It relies on planner statistics (n_live_tup, on-disk size)
+    // that drift with autovacuum/bloat, so mixing it into an exact-table
+    // fingerprint would cause spurious "data changed". Keep it out when we
+    // have exact table signals; always compute it for the human summary.
+    let overview: DbOverview | null = null;
+    try {
+      overview = await this.databaseOverview(ctx);
+    } catch {
+      overview = null;
+    }
+    if (overview && tables.length === 0) {
+      parts.push(`size:${overview.sizeBytes}`, `rows:${overview.rows}`);
     }
 
     if (parts.length === 0) {

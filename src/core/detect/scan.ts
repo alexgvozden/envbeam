@@ -72,7 +72,7 @@ export async function findFilesShallow(
       }
       for (const entry of entries) {
         if (entry.isDirectory()) {
-          if (depth < maxDepth && !ignore.has(entry.name) && !entry.name.startsWith('.git')) {
+          if (depth < maxDepth && !ignore.has(entry.name)) {
             nextFrontier.push(path.join(dir, entry.name));
           }
         } else if (entry.isFile() && wanted.has(entry.name)) {
@@ -126,7 +126,7 @@ export async function findFileShallow(
       const fileNames = new Set<string>();
       for (const entry of entries) {
         if (entry.isDirectory()) {
-          if (depth < maxDepth && !ignore.has(entry.name) && !entry.name.startsWith('.git')) {
+          if (depth < maxDepth && !ignore.has(entry.name)) {
             nextFrontier.push(path.join(dir, entry.name));
           }
         } else if (entry.isFile()) {

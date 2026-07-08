@@ -186,8 +186,11 @@ export async function detectMigrateCommand(root: string): Promise<MigrateMarker 
     const rel = path.relative(root, alembicIni);
     // Run from the directory holding alembic.ini so its config is picked up.
     const dir = path.dirname(rel);
+    // The migrate command is executed via `sh -c`, so the scanned path (dir
+    // names are attacker-controllable in a cloned repo) MUST NOT be able to
+    // break out of the argument — shell-quote it.
     const command =
-      dir === '.' ? 'alembic upgrade head' : `alembic -c ${rel} upgrade head`;
+      dir === '.' ? 'alembic upgrade head' : `alembic -c ${shellArgQuote(rel)} upgrade head`;
     return { command, source: rel };
   }
   // Go: golang-migrate convention
@@ -195,6 +198,16 @@ export async function detectMigrateCommand(root: string): Promise<MigrateMarker 
     return { command: 'migrate -path migrations -database "$DATABASE_URL" up', source: 'migrations/ (golang-migrate)' };
   }
   return null;
+}
+
+/**
+ * Make a scanned path safe to interpolate into a `sh -c` command string. A path
+ * containing only benign characters is used as-is (works on both sh and cmd);
+ * anything else is POSIX single-quoted so shell metacharacters can't inject.
+ */
+export function shellArgQuote(p: string): string {
+  if (/^[A-Za-z0-9._/\\-]+$/.test(p) && !p.startsWith('-')) return p;
+  return `'${p.replace(/'/g, `'\\''`)}'`;
 }
 
 async function firstFileMatching(dir: string, re: RegExp): Promise<string | null> {

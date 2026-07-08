@@ -32,9 +32,16 @@ function isDaemonError(stderr: string): boolean {
   return /cannot connect to the docker daemon|is the docker daemon running|docker daemon/i.test(stderr);
 }
 
-/** Extract the host port from a "Bind for 0.0.0.0:5432 failed: port is already allocated" error. */
+/**
+ * Extract the host port from a compose "port already in use" error. Covers both
+ * the dockerd wording ("Bind for 0.0.0.0:5432 failed: port is already
+ * allocated") and Docker Desktop's ("... bind: address already in use").
+ */
 export function parsePortConflict(stderr: string): string | null {
-  const m = stderr.match(/bind for [\d.:[\]]*:(\d+) failed: port is already allocated/i);
+  const m =
+    stderr.match(/bind for [\d.:[\]]*:(\d+) failed: port is already allocated/i) ??
+    stderr.match(/:(\d+)(?:\s*->\s*\S+)?:\s*bind: address already in use/i) ??
+    stderr.match(/ports are not available:.*?:(\d+)\b/i);
   return m?.[1] ?? null;
 }
 

@@ -101,6 +101,12 @@ export class DopplerSecretsProvider implements SecretsProvider {
       } catch {
         /* fall through to create */
       }
+    } else {
+      // A scoped service token can read/write its own config's secrets but may
+      // lack `projects list`/`create` permission. Don't block push/resume on
+      // that — assume the project exists rather than trying (and failing) to
+      // create it.
+      return { ready: true, detail: 'could not verify Doppler project (assuming it exists)' };
     }
 
     const createCmd = `doppler projects create ${project}`;

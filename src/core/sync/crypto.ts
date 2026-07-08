@@ -89,15 +89,18 @@ export async function decryptFile(
   if (cfg.encrypt === 'age') {
     const privateKey = getAgePrivateKey();
     if (privateKey) {
-      // Write private key to temp file for age -d -i
-      const tempKeyFile = path.join(os.tmpdir(), `envbeam-age-${Date.now()}.key`);
+      // Write the private key inside a fresh 0700 dir (mkdtemp gives a
+      // unique, unpredictable, owner-only path) — never a predictable name in
+      // the world-traversable tmpdir where a symlink could redirect the write.
+      const keyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'envbeam-age-'));
+      const tempKeyFile = path.join(keyDir, 'key.txt');
       try {
-        await fs.writeFile(tempKeyFile, privateKey + '\n', { mode: 0o600 });
+        await fs.writeFile(tempKeyFile, privateKey + '\n', { mode: 0o600, flag: 'wx' });
         await ctx.runner.run('age', ['-d', '-i', tempKeyFile, '-o', outFile, inFile], {
           cwd: ctx.workspaceRoot,
         });
       } finally {
-        await fs.rm(tempKeyFile, { force: true }).catch(() => {});
+        await fs.rm(keyDir, { recursive: true, force: true }).catch(() => {});
       }
     } else {
       // Fall back to default identity locations

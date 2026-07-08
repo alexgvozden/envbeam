@@ -106,6 +106,23 @@ describe('postgres provider', () => {
     expect(second.changed).toBe(true);
   });
 
+  it('ignores volatile size/row estimates in the fingerprint when change tables are configured', async () => {
+    const runner = new FakeRunner({ available: ['psql'] });
+    let dbSize = 1000;
+    runner.on('psql', (_c, args) => {
+      const sql = args.join(' ');
+      if (sql.includes('SELECT 1')) return { stdout: '1' };
+      if (sql.includes('pg_database_size') || sql.includes('pg_stat_user_tables')) return { stdout: String(dbSize) };
+      return { stdout: '42' }; // seed_users count stays constant (no real data change)
+    });
+    const provider = new PostgresProvider();
+    const ctx = pgCtx(runner, '/tmp', {}, { changeTables: ['seed_users'] });
+    const first = await provider.hasChanged(ctx, undefined);
+    dbSize = 999999; // autovacuum/bloat shifts size + n_live_tup estimate
+    const second = await provider.hasChanged(ctx, first.fingerprint);
+    expect(second.changed).toBe(false); // estimates must not flip change detection
+  });
+
   it('produces a baseline from db size + row count even when no tables are configured', async () => {
     const runner = new FakeRunner({ available: ['psql'] });
     runner.on('psql', (_c, args) => (args.includes('SELECT 1') ? { stdout: '1' } : { stdout: '4096' }));

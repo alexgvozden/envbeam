@@ -18,6 +18,31 @@ export interface PullCliOptions extends GlobalCliOptions {
   dir?: string;
 }
 
+/**
+ * Reject a registry-supplied git remote that could make git execute a command
+ * or be read as a flag. Allows normal scp-style (`git@host:org/repo`) and
+ * http(s)/ssh/git URLs; blocks `ext::`, `file://`, other `<transport>::` forms,
+ * and leading `-`.
+ */
+export function assertSafeGitRemote(remote: string): void {
+  const bad =
+    remote.startsWith('-') ||
+    /^[a-z][a-z0-9+.-]*::/i.test(remote) || // ext::, transport helper forms
+    /^(file|ext|fd):/i.test(remote);
+  const ok = /^(https?:\/\/|ssh:\/\/|git:\/\/|git@|[a-z0-9.-]+@[a-z0-9.-]+:)/i.test(remote);
+  if (bad || !ok) {
+    throw new EnvbeamError(`Refusing to clone an unsafe git remote: ${remote}`, {
+      exitCode: 2,
+      hint: 'The stored remote must be an https/ssh/git URL or a scp-style host:path.',
+    });
+  }
+}
+
+/** A branch value safe to pass to `git checkout` (no flag/injection surface). */
+export function isSafeGitBranch(branch: string): boolean {
+  return !branch.startsWith('-') && /^[A-Za-z0-9._/-]+$/.test(branch);
+}
+
 export async function pullCommand(opts: PullCliOptions): Promise<number> {
   const logger = makeLogger(opts);
 
@@ -118,8 +143,12 @@ async function bootstrapPullCommand(projectName: string, opts: PullCliOptions): 
         { exitCode: 1 },
       );
     }
+    // The remote comes from the shared registry (another machine wrote it), so
+    // reject git's code-executing transports and flag-looking values before it
+    // reaches `git clone`.
+    assertSafeGitRemote(project.gitRemote);
 
-    const cloneRes = await runner.run('git', ['clone', project.gitRemote, targetDir], {
+    const cloneRes = await runner.run('git', ['clone', '--', project.gitRemote, targetDir], {
       allowFailure: true,
     });
 
@@ -133,8 +162,15 @@ async function bootstrapPullCommand(projectName: string, opts: PullCliOptions): 
     logger.sub(pc.dim(`Cloned to ${targetDir}`));
 
     // 4. Checkout the correct branch
-    if (project.gitBranch && project.gitBranch !== 'main' && project.gitBranch !== 'master') {
+    if (
+      project.gitBranch &&
+      project.gitBranch !== 'main' &&
+      project.gitBranch !== 'master' &&
+      isSafeGitBranch(project.gitBranch)
+    ) {
       logger.info(`Checking out branch ${project.gitBranch}…`);
+      // isSafeGitBranch already rejected `-`-leading values, so this can't be
+      // read as a flag; `--` isn't used because for checkout it means pathspec.
       const checkoutRes = await runner.run('git', ['checkout', project.gitBranch], {
         cwd: targetDir,
         allowFailure: true,

@@ -17,6 +17,7 @@ import { PreflightError } from '../util/errors.js';
 import { assertSecretsAuth } from './preflight.js';
 import { detectedValue, resolveBranch } from '../detect/types.js';
 import { ensureTools } from '../util/tools.js';
+import { stripUrlCreds } from '../util/redact.js';
 import { sessionSummary } from './format.js';
 import type { GitPushResult, SnapshotOptions } from '../providers/types.js';
 
@@ -121,7 +122,9 @@ export async function runPause(ctx: RunContext, opts: PauseOptions): Promise<Pau
     // Record git remote + branch into the provider so it alone says what to
     // clone (visible in Doppler; never materialized into .env). Best-effort.
     if (active.secrets.recordMeta && !ctx.dryRun) {
-      const gitRemote = detectedValue(ctx.detection, 'git.url');
+      // Strip any embedded token from the remote before recording it (it must
+      // not sit in `doppler secrets set` argv, visible via `ps`).
+      const gitRemote = stripUrlCreds(detectedValue(ctx.detection, 'git.url') ?? '');
       const gitBranch = resolveBranch(ctx.detection, ctx.config.git?.branch);
       const meta = await active.secrets.recordMeta(ctx.providerCtx('secrets'), {
         ENVBEAM_GIT_REMOTE: gitRemote ?? '',
@@ -294,34 +297,37 @@ async function pauseDatabase(
   let uploadFile = result.file;
   let uploadName = path.basename(result.file);
   let encryptedFile: string | null = null;
-  if (suffix) {
-    const tool = cryptoCfg.encrypt === 'gpg' ? 'gpg' : 'age';
-    const t = await ensureTools([tool], dctx.runner, dctx.logger, dctx.prompter);
-    if (t.allInstalled) {
-      uploadFile = result.file + suffix;
-      uploadName += suffix;
-      encryptedFile = uploadFile;
-      await encryptFile(dctx, cryptoCfg, result.file, uploadFile);
-      log.sub(`snapshot encrypted (${cryptoCfg.encrypt})`);
+  // The plaintext dump (and any encrypted copy) must never survive an error —
+  // wrap encrypt+upload so a failure can't leave a full DB dump in the temp dir.
+  try {
+    if (suffix) {
+      const tool = cryptoCfg.encrypt === 'gpg' ? 'gpg' : 'age';
+      const t = await ensureTools([tool], dctx.runner, dctx.logger, dctx.prompter);
+      if (t.allInstalled) {
+        uploadFile = result.file + suffix;
+        uploadName += suffix;
+        encryptedFile = uploadFile;
+        await encryptFile(dctx, cryptoCfg, result.file, uploadFile);
+        log.sub(`snapshot encrypted (${cryptoCfg.encrypt})`);
+      } else {
+        log.warn(`${tool} unavailable — snapshot stored UNENCRYPTED`);
+      }
     } else {
-      log.warn(`${tool} unavailable — snapshot stored UNENCRYPTED`);
+      log.warn('snapshot stored UNENCRYPTED — run `envbeam session setup` to generate age keys for at-rest encryption');
     }
-  } else {
-    log.warn('snapshot stored UNENCRYPTED — run `envbeam session setup` to generate age keys for at-rest encryption');
+
+    const entry = await target.put(dctx, uploadFile, uploadName);
+    const pruned = await target.prune(dctx, ctx.config.workspace, db.sync.keep ?? 5);
+    if (pruned.length) log.sub(`pruned ${pruned.length} old snapshot(s)`);
+
+    await patchState(ctx.workspaceRoot, { lastSnapshotTimestamp: timestamp });
+    out.snapshot = { timestamp, file: entry.name, sizeBytes: result.sizeBytes };
+    log.sub(`snapshot pushed → ${entry.name} (${sizeMB.toFixed(1)}MB)`);
+    return out;
+  } finally {
+    await fs.rm(result.file, { force: true }).catch(() => undefined);
+    if (encryptedFile) await fs.rm(encryptedFile, { force: true }).catch(() => undefined);
   }
-
-  const entry = await target.put(dctx, uploadFile, uploadName);
-  const pruned = await target.prune(dctx, ctx.config.workspace, db.sync.keep ?? 5);
-  if (pruned.length) log.sub(`pruned ${pruned.length} old snapshot(s)`);
-
-  // record + cleanup local artifacts
-  await patchState(ctx.workspaceRoot, { lastSnapshotTimestamp: timestamp });
-  await fs.rm(result.file, { force: true }).catch(() => undefined);
-  if (encryptedFile) await fs.rm(encryptedFile, { force: true }).catch(() => undefined);
-
-  out.snapshot = { timestamp, file: entry.name, sizeBytes: result.sizeBytes };
-  log.sub(`snapshot pushed → ${entry.name} (${sizeMB.toFixed(1)}MB)`);
-  return out;
 }
 
 function printPauseReport(ctx: RunContext, report: PauseReport): void {

@@ -66,6 +66,9 @@ const VERSION_STRING = BUILD?.commit
 function ensureFreshBuild(): void {
   const stale = BUILD ? BUILD.version !== VERSION : IS_COMPILED;
   if (!stale || process.env.ENVBEAM_SKIP_REBUILD) return;
+  // Don't compile the project just to answer a version/help query.
+  const argv = process.argv.slice(2);
+  if (argv.length === 0 || argv.some((a) => ['-V', '--version', '-h', '--help'].includes(a))) return;
 
   console.error(
     pc.yellow(
@@ -93,7 +96,9 @@ function ensureFreshBuild(): void {
         stdio: 'inherit',
         env: { ...process.env, ENVBEAM_REBUILT: '1' },
       });
-      process.exit(rerun.status ?? 0);
+      // A signal-killed child (Ctrl-C / OOM) has status === null — don't report
+      // it as success (exit 0), or an interrupted push looks completed.
+      process.exit(rerun.status == null ? 1 : rerun.status);
     }
     console.error(pc.red('  rebuild failed — reinstall instead:'));
   }

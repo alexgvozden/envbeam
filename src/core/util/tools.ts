@@ -340,9 +340,17 @@ export async function ensureTool(
   }
   logger.raw('');
 
-  const shouldInstall = await prompter.confirm(`Install ${tool.name} now?`, true);
+  // Installs run vendor scripts (some `curl | sh`), so require real consent.
+  // On a TTY we prompt (default yes). Non-interactively we install ONLY when
+  // the caller passed --yes (AutoPrompter with defaults=true) — never silently
+  // in CI/piped runs, which would be RCE-by-default on a compromised endpoint.
+  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const shouldInstall = await prompter.confirm(`Install ${tool.name} now?`, interactive);
 
   if (!shouldInstall) {
+    if (!interactive) {
+      logger.hint(`Skipped auto-install of ${tool.name} (non-interactive). Install it, or re-run with --yes.`);
+    }
     return { installed: false, wasInstalled: false };
   }
 

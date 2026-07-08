@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-07-08
+
+### Security
+- **Command injection via detected Alembic path** — a scanned `alembic.ini` path was interpolated into a `sh -c` migrate command, so a repo with a maliciously-named nested directory could execute arbitrary code on `resume`/`pull`. The path is now shell-quoted (`shellArgQuote`).
+- **No silent `curl | sh` tool installs in CI/non-interactive runs** — auto-install now requires a real prompt on a TTY, or an explicit `--yes` non-interactively; it never installs (piping vendor scripts to `sh`) by default in piped/CI contexts.
+- **Secrets no longer leak to the command trace** — `--verbose`/`ENVBEAM_TRACE` output now redacts URL credentials (`postgres://user:***@…`, token git remotes). The recorded `ENVBEAM_GIT_REMOTE` also strips any embedded token before it reaches `doppler secrets set` argv.
+- **Bootstrap validates the registry-supplied git remote/branch** — refuses code-executing transports (`ext::`, `file:`) and flag-looking values before `git clone`/`checkout`.
+- **Untrusted session archives handled safely on restore** — extraction uses `--no-same-owner`, refuses any archive containing a symlink (tar breakout), copies plain files only, and never overwrites security-sensitive Claude config (`settings*.json`, `*.mcp.json`) that could inject hooks.
+- **No plaintext left on disk** — DB snapshots and session archives are written to private `mkdtemp` (0700) dirs and removed in `finally` on every path; the age private key is written with `O_EXCL` inside a fresh 0700 dir instead of a predictable tmp name.
+
+### Fixed
+- Change-detection fingerprint no longer folds in volatile planner estimates (`pg_database_size`, `n_live_tup`, MySQL `table_rows`) when change tables are configured, so `push` stops reporting spurious "data changed".
+- `envbeam -V`/`--help` no longer trigger a full self-rebuild; the rebuild re-exec now maps a signal-killed child to a non-zero exit instead of 0.
+- Shallow detection scan no longer skips `.github`/`.gitlab` (the `.startsWith('.git')` over-match); `.git` is still ignored.
+- Doppler `ensureReady` no longer hard-blocks a scoped service token that lacks `projects list` permission.
+- `parsePortConflict` now also matches Docker Desktop's "address already in use" wording.
+
 ## [0.14.0] - 2026-07-08
 
 ### Changed
