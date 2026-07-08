@@ -1,7 +1,8 @@
 import pc from 'picocolors';
 import { RealCommandRunner } from '../core/util/exec.js';
-import { createRegistryStore, isStorageConfigured } from '../core/registry/index.js';
-import { makeLogger, runCommand, type GlobalCliOptions } from './shared.js';
+import { createRegistryStore } from '../core/registry/index.js';
+import { ensureStorageReady } from './storage.js';
+import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
 
 export interface ListCliOptions extends GlobalCliOptions {
   json?: boolean;
@@ -12,16 +13,13 @@ export interface ListCliOptions extends GlobalCliOptions {
  */
 export async function listCommand(opts: ListCliOptions): Promise<number> {
   const logger = makeLogger(opts);
+  const prompter = makePrompter(opts);
 
   return runCommand(logger, async () => {
-    // Check if storage is configured
-    if (!(await isStorageConfigured())) {
-      logger.error('Global storage not configured.');
-      logger.hint('Run `envbeam setup` to configure S3 storage first.');
-      return 1;
-    }
-
     const runner = new RealCommandRunner();
+    // Self-heal storage (install/auth Doppler, import S3 config) before listing.
+    if (!(await ensureStorageReady({ runner, logger, prompter }))) return 1;
+
     const store = await createRegistryStore(runner);
     const projects = await store.listProjects();
 

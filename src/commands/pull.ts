@@ -6,7 +6,8 @@ import { runResume } from '../core/pipeline/resume.js';
 import { RealCommandRunner } from '../core/util/exec.js';
 import { pathExists } from '../core/util/fs.js';
 import { EnvbeamError } from '../core/util/errors.js';
-import { createRegistryStore, isStorageConfigured, checkProjectRegistration } from '../core/registry/index.js';
+import { createRegistryStore, checkProjectRegistration } from '../core/registry/index.js';
+import { ensureStorageReady } from './storage.js';
 import { WORKSPACE_CONFIG_NAME } from '../core/config/paths.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
 
@@ -50,12 +51,12 @@ async function bootstrapPullCommand(projectName: string, opts: PullCliOptions): 
   const runner = new RealCommandRunner();
 
   return runCommand(logger, async () => {
-    // Check if storage is configured
-    if (!(await isStorageConfigured())) {
-      throw new EnvbeamError(
-        'Global storage not configured. Run `envbeam setup` first.',
-        { exitCode: 2, hint: 'envbeam setup' },
-      );
+    // Self-heal storage (install/auth Doppler, import S3 config) before pulling.
+    if (!(await ensureStorageReady({ runner, logger, prompter }))) {
+      throw new EnvbeamError('Storage could not be configured.', {
+        exitCode: 2,
+        hint: 'Run `envbeam setup` to configure S3 storage.',
+      });
     }
 
     // 1. Load registry and find project

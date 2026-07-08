@@ -6,9 +6,11 @@ import { configValidateCommand, configExplainCommand, configSyncCommand } from '
 import { identityAddCommand, identityListCommand, identityRemoveCommand, identityTestCommand } from '../../src/commands/identity.js';
 import { doctorCommand } from '../../src/commands/doctor.js';
 import { statusCommand } from '../../src/commands/status.js';
-import { readExistingDopplerStorage } from '../../src/commands/storage.js';
+import { readExistingDopplerStorage, ensureStorageReady } from '../../src/commands/storage.js';
 import { tmpDir, writeFiles } from '../helpers/context.js';
 import { FakeRunner } from '../helpers/fakeRunner.js';
+import { Logger } from '../../src/core/util/logger.js';
+import { AutoPrompter } from '../../src/core/util/prompt.js';
 
 const DOPPLER_SECRETS = 'doppler secrets --project envbeam-global --config prd --json';
 const dopplerSecret = (computed: string) => ({ computed });
@@ -35,6 +37,9 @@ afterEach(async () => {
   process.chdir(originalCwd);
   delete process.env.ENVBEAM_HOME;
   delete process.env.ENVBEAM_CREDENTIAL_STORE;
+  for (const k of ['ENVBEAM_S3_ACCESS_KEY', 'ENVBEAM_S3_SECRET_KEY', 'ENVBEAM_S3_BUCKET', 'ENVBEAM_S3_REGION', 'ENVBEAM_S3_ENDPOINT']) {
+    delete process.env[k];
+  }
   while (cleanups.length) await cleanups.pop()!();
 });
 
@@ -183,6 +188,46 @@ describe('readExistingDopplerStorage', () => {
   it('returns null on unparseable doppler output', async () => {
     const runner = new FakeRunner().on(DOPPLER_SECRETS, { stdout: 'not json' });
     expect(await readExistingDopplerStorage(runner)).toBeNull();
+  });
+});
+
+describe('ensureStorageReady (self-heal from Doppler)', () => {
+  const deps = (runner: FakeRunner) => ({
+    runner,
+    logger: new Logger({ level: 'error' }),
+    prompter: new AutoPrompter({ defaults: true }),
+  });
+
+  it('imports S3 settings from Doppler and reports ready', async () => {
+    await workspace(); // isolated ENVBEAM_HOME → storage not configured yet
+    const runner = new FakeRunner({ available: ['doppler', 'aws'] });
+    runner.on('doppler me', { stdout: '{"name":"me"}' });
+    runner.on(DOPPLER_SECRETS, {
+      stdout: JSON.stringify({
+        ENVBEAM_S3_BUCKET: dopplerSecret('b'),
+        ENVBEAM_S3_ACCESS_KEY: dopplerSecret('ak'),
+        ENVBEAM_S3_SECRET_KEY: dopplerSecret('sk'),
+        ENVBEAM_S3_ENDPOINT: dopplerSecret('https://e'),
+        ENVBEAM_S3_REGION: dopplerSecret('auto'),
+      }),
+    });
+    expect(await ensureStorageReady(deps(runner))).toBe(true);
+    expect(process.env.ENVBEAM_S3_BUCKET).toBe('b'); // applied to env for this process
+  });
+
+  it('reports not-ready (guides to setup) when Doppler has no S3 settings', async () => {
+    await workspace();
+    const runner = new FakeRunner({ available: ['doppler'] });
+    runner.on('doppler me', { stdout: '{"name":"me"}' });
+    runner.on(DOPPLER_SECRETS, { stdout: '{}' }); // nothing stored
+    expect(await ensureStorageReady(deps(runner))).toBe(false);
+  });
+
+  it('reports not-ready when not signed in to Doppler', async () => {
+    await workspace();
+    const runner = new FakeRunner({ available: ['doppler'] });
+    runner.on('doppler me', { code: 1, stderr: 'you must provide a token' });
+    expect(await ensureStorageReady(deps(runner))).toBe(false);
   });
 });
 
