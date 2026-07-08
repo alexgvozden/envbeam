@@ -5,6 +5,7 @@ import type {
   ToolRequirement,
 } from '../types.js';
 import type { ProviderFactory } from '../registry.js';
+import { ensureDockerRunning } from '../../util/docker.js';
 
 const FOLDER_LABEL = 'devcontainer.local_folder';
 
@@ -43,6 +44,7 @@ export class DevcontainerProvider implements ContainerProvider {
       ctx.logger.sub(`would run: devcontainer up --workspace-folder ${ctx.workspaceRoot}`);
       return this.status(ctx);
     }
+    await ensureDockerRunning(ctx);
     const res = await ctx.runner.run(
       'devcontainer',
       ['up', '--workspace-folder', ctx.workspaceRoot],

@@ -4,12 +4,49 @@ import { DevcontainerProvider } from '../../src/core/providers/container/devcont
 import { ClaudeSyncProvider } from '../../src/core/providers/session/claudeSync.js';
 import { RemoteControlProvider } from '../../src/core/providers/session/remoteControl.js';
 import { NoneSessionProvider } from '../../src/core/providers/session/none.js';
+import { ensureDockerRunning } from '../../src/core/util/docker.js';
 import { FakeRunner } from '../helpers/fakeRunner.js';
 import { makeTestContext, tmpDir, writeFiles } from '../helpers/context.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   while (cleanups.length) await cleanups.pop()!();
+});
+
+describe('ensureDockerRunning (self-heal)', () => {
+  const ctxWith = (runner: FakeRunner) =>
+    makeTestContext({ config: { version: 1, workspace: 'w' }, runner }).providerCtx('container');
+
+  it('returns true immediately when the daemon is already up', async () => {
+    const runner = new FakeRunner();
+    runner.on('docker info', { stdout: '25.0' });
+    expect(await ensureDockerRunning(ctxWith(runner))).toBe(true);
+    expect(runner.calls.some((c) => ['open', 'sh', 'cmd'].includes(c.command))).toBe(false);
+  });
+
+  it('starts Docker and waits until the daemon becomes ready', async () => {
+    const runner = new FakeRunner();
+    let up = false;
+    runner.on('docker info', () => (up ? { stdout: '25.0' } : { code: 1, stderr: 'Cannot connect' }));
+    const markUp = () => {
+      up = true; // the launch command brings the daemon up
+      return {};
+    };
+    runner.on('open', markUp);
+    runner.on('sh', markUp);
+    runner.on('cmd', markUp);
+    expect(await ensureDockerRunning(ctxWith(runner), 10_000)).toBe(true);
+    expect(runner.calls.some((c) => ['open', 'sh', 'cmd'].includes(c.command))).toBe(true);
+  });
+
+  it('returns false if the daemon never comes up (bounded wait)', async () => {
+    const runner = new FakeRunner();
+    runner.on('docker info', { code: 1, stderr: 'Cannot connect' });
+    runner.on('open', {});
+    runner.on('sh', {});
+    runner.on('cmd', {});
+    expect(await ensureDockerRunning(ctxWith(runner), 100)).toBe(false);
+  });
 });
 
 describe('compose container provider', () => {

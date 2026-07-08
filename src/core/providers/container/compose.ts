@@ -7,6 +7,7 @@ import type {
 } from '../types.js';
 import type { ProviderFactory } from '../registry.js';
 import { findComposeFile } from '../../detect/container.js';
+import { ensureDockerRunning } from '../../util/docker.js';
 import { EnvbeamError } from '../../util/errors.js';
 
 export async function resolveComposeFile(ctx: ProviderContext): Promise<string> {
@@ -53,6 +54,12 @@ export class ComposeContainerProvider implements ContainerProvider {
     if (ctx.dryRun) {
       ctx.logger.sub(`would run: docker compose -f ${path.relative(ctx.workspaceRoot, file)} ${rest.join(' ')}`);
       return this.status(ctx);
+    }
+    if (!(await ensureDockerRunning(ctx))) {
+      throw new EnvbeamError('Docker daemon is not running and could not be started.', {
+        exitCode: 2,
+        hint: 'Start Docker Desktop (or the docker service), then re-run.',
+      });
     }
     await ctx.runner.run('docker', composeArgs(file, rest), { cwd: ctx.workspaceRoot });
     return this.status(ctx);

@@ -121,9 +121,10 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
   }
 
   // 5. Container
-  if (active.container && ctx.config.container?.upOnResume !== false) {
+  const containerStarted = active.container && ctx.config.container?.upOnResume !== false;
+  if (containerStarted) {
     log.step('Container');
-    const status = await active.container.up(ctx.providerCtx('container'));
+    const status = await active.container!.up(ctx.providerCtx('container'));
     report.container = status;
     log.sub(status.running ? 'container up' : status.detail ?? 'container not running');
   }
@@ -131,12 +132,38 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
   // 6. Database
   if (ctx.config.database) {
     log.step('Database');
+    // If we just started the container, the DB may need a moment to accept
+    // connections before migrations/restore — wait for it (best-effort).
+    if (containerStarted && active.database && !ctx.dryRun) {
+      await waitForDbReady(ctx, active.database);
+    }
     report.database = await resumeDatabase(ctx, active);
   }
 
   // 7. Report
   printResumeReport(ctx, report);
   return report;
+}
+
+/** Poll the DB until it accepts connections (best-effort, ~45s cap). */
+async function waitForDbReady(
+  ctx: RunContext,
+  db: NonNullable<ReturnType<typeof resolveActiveProviders>['database']>,
+): Promise<void> {
+  const dctx = ctx.providerCtx('database');
+  if ((await db.status(dctx)).reachable) return;
+  ctx.logger.sub('waiting for the database to accept connections…');
+  const startedAt = Date.now();
+  let waited = 0;
+  while (Date.now() - startedAt < 45_000) {
+    await new Promise((r) => setTimeout(r, 2000));
+    waited += 2;
+    if ((await db.status(dctx)).reachable) {
+      ctx.logger.sub(pc.dim(`database ready (after ${waited}s)`));
+      return;
+    }
+  }
+  ctx.logger.sub(pc.yellow('database still not reachable — continuing (migrations may fail)'));
 }
 
 async function resumeDatabase(
