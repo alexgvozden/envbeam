@@ -18,14 +18,14 @@ describe('ensureDockerRunning (self-heal)', () => {
     makeTestContext({ config: { version: 1, workspace: 'w' }, runner }).providerCtx('container');
 
   it('returns true immediately when the daemon is already up', async () => {
-    const runner = new FakeRunner();
+    const runner = new FakeRunner({ available: ['docker'] });
     runner.on('docker info', { stdout: '25.0' });
     expect(await ensureDockerRunning(ctxWith(runner))).toBe(true);
     expect(runner.calls.some((c) => ['open', 'sh', 'cmd'].includes(c.command))).toBe(false);
   });
 
   it('starts Docker and waits until the daemon becomes ready', async () => {
-    const runner = new FakeRunner();
+    const runner = new FakeRunner({ available: ['docker'] }); // installed, daemon down
     let up = false;
     runner.on('docker info', () => (up ? { stdout: '25.0' } : { code: 1, stderr: 'Cannot connect' }));
     const markUp = () => {
@@ -39,8 +39,23 @@ describe('ensureDockerRunning (self-heal)', () => {
     expect(runner.calls.some((c) => ['open', 'sh', 'cmd'].includes(c.command))).toBe(true);
   });
 
+  it('installs Docker when it is not installed', async () => {
+    const runner = new FakeRunner(); // docker not on PATH
+    let installed = false;
+    runner.on('docker', () => (installed ? { stdout: '25.0' } : { code: 127, stderr: 'not found' }));
+    const install = () => {
+      installed = true;
+      runner.available('docker'); // the install puts docker on PATH + daemon up
+      return {};
+    };
+    runner.on('sh', install);
+    runner.on('cmd', install);
+    expect(await ensureDockerRunning(ctxWith(runner), 10_000)).toBe(true);
+    expect(runner.calls.some((c) => ['sh', 'cmd'].includes(c.command))).toBe(true); // ran an install
+  });
+
   it('returns false if the daemon never comes up (bounded wait)', async () => {
-    const runner = new FakeRunner();
+    const runner = new FakeRunner({ available: ['docker'] });
     runner.on('docker info', { code: 1, stderr: 'Cannot connect' });
     runner.on('open', {});
     runner.on('sh', {});

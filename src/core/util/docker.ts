@@ -1,6 +1,7 @@
 import os from 'node:os';
 import pc from 'picocolors';
 import type { ProviderContext } from '../providers/types.js';
+import { ensureTools } from './tools.js';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -33,13 +34,23 @@ function startDockerCommand(): { command: string; args: string[] } | null {
 }
 
 /**
- * Ensure the Docker daemon is running before we shell out to `docker`.
- * If it's down, start Docker Desktop (or the service) and wait for it to become
- * ready — self-healing rather than failing with "Is the docker daemon running?".
- * Returns true when the daemon is up (already, or after starting). No-op in
- * dry-run. Skipped silently on unknown platforms.
+ * Ensure Docker is installed AND its daemon is running before we shell out to
+ * `docker`. If the CLI is missing, install it for the user (per the auto-install
+ * rule). If the daemon is down, start Docker Desktop (or the service) and wait
+ * for it to become ready — self-healing rather than failing with "command not
+ * found" or "Is the docker daemon running?". Returns true when Docker is usable.
+ * No-op in dry-run. Skipped silently on unknown platforms.
  */
 export async function ensureDockerRunning(ctx: ProviderContext, timeoutMs = 120_000): Promise<boolean> {
+  // 1) Installed? Install it for the user if not (prompts via ensureTools).
+  if (!(await ctx.runner.which('docker'))) {
+    if (ctx.dryRun) return true;
+    ctx.logger.sub('Docker is not installed — installing…');
+    const res = await ensureTools(['docker'], ctx.runner, ctx.logger, ctx.prompter);
+    if (!res.allInstalled && !(await ctx.runner.which('docker'))) return false;
+  }
+
+  // 2) Daemon up?
   if (await daemonUp(ctx)) return true;
   if (ctx.dryRun) return true;
 
