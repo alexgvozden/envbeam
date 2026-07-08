@@ -18,21 +18,23 @@ envbeam pull     # pick up where you left off on the other one
 
 > `pause` and `resume` are exact aliases for `push` and `pull` — use whichever reads better to you.
 
-**Contents** · [What it moves](#what-it-moves) · [How it works](#how-it-works) · [Install](#install) · [Quick start](#quick-start) · [Push here, pull there](#push-here-pull-there) · [All commands](#all-commands) · [Supported platforms](#supported-platforms) · [Configuration](#configuration) · [Guarantees](#guarantees) · [Development](#development)
+**Contents** · [What it moves](#what-it-moves) · [How it works](#how-it-works) · [Install](#install) · [Quick start](#quick-start) · [Push here, pull there](#push-here-pull-there) · [All commands](#all-commands) · [Supported platforms](#supported-platforms) · [Configuration](#configuration) · [Guarantees](#guarantees) · [Extending](#extending-envbeam) · [Development](#development)
 
 ---
 
 ## What it moves
 
-| | Carried by | Where it goes |
+| | Handled by | How it travels |
 |---|---|---|
-| 🧬 **Code** | `git` | your git remote |
-| 🔐 **Secrets** | Doppler / 1Password | pulled into a gitignored `.env` |
-| 📦 **Container** | Dev Container / Compose | rebuilt on the other machine |
-| 🗄️ **Database state** | `pg_dump` / `mysqldump` | encrypted snapshot on your sync target |
-| 🤖 **Claude Code session** | `claude-sync` | encrypted on your sync target |
+| 🧬 **Code** | `git` | pushed to / pulled from your git remote |
+| 🔐 **Secrets** | Doppler / 1Password | re-fetched from your provider into a gitignored `.env` — never shipped by envbeam |
+| 📦 **Container** | Dev Container / Compose | brought up on the other machine |
+| 🗄️ **Database** | `pg_dump` / `mysqldump` | age-encrypted snapshot on your sync target |
+| 🤖 **Claude session** | `claude-native` (built-in) | age-encrypted archive on your sync target |
 
 Each concern runs under **the right account** for it (work GitHub, personal Doppler vault, …). There is **no envbeam backend** — everything flows only through infrastructure *you already own*.
+
+> Secrets aren't beamed — both machines point at the same provider, so `pull` just re-materializes them locally. Session sync is **opt-in** (off by default; enable it with `envbeam session setup`).
 
 ---
 
@@ -54,7 +56,7 @@ Each concern runs under **the right account** for it (work GitHub, personal Dopp
                  │  code   ───────────►  git remote     GitHub/GitLab │
                  │  secrets ──────────►  Doppler · 1Password          │
                  │  database snapshot ►  S3 · Syncthing · local dir   │
-                 │  Claude session ───►  S3  (age/gpg encrypted)      │
+                 │  Claude session ───►  same sync target (age-enc.)  │
                  └───────────────────────────────────────────────────┘
                      no envbeam server ever sees your code or data
 ```
@@ -254,23 +256,38 @@ Then `envbeam pull my-app` on a fresh machine clones it, loads secrets, and brin
 
 ## Supported platforms
 
-Every concern is a swappable interface — mix and match freely (a work GitHub with a personal Doppler vault and an S3 bucket is a normal setup).
+Each concern is a swappable provider — mix and match freely (a work GitHub with a personal Doppler vault and an S3 bucket is a normal setup). These are the built-ins; the provider kinds marked *pluggable* accept [your own](#extending-envbeam).
 
-| Concern | Supported |
+| Concern | Built-in providers | |
+|---|---|---|
+| **Code** | `git` | GitHub, GitLab, or any self-hosted remote · *pluggable* |
+| **Secrets** | `doppler`, `onepassword` | materialized to a gitignored `.env` or a `run-wrapper` script; `pull-only` or `two-way` · *pluggable* |
+| **Container** | `devcontainer`, `compose`, `none` | brought up on `pull` · *pluggable* |
+| **Database** | `postgres`, `mysql` | `migrations-only` (default) or `snapshot` mode · *pluggable* |
+| **Claude session** | `claude-native`, `claude-sync`, `remote-control`, `none` | default `none` (opt-in) · *pluggable* — see below |
+
+Session providers differ in what they actually do:
+
+| Provider | What it does |
 |---|---|
-| **Code** | `git` (GitHub, GitLab, self-hosted) |
-| **Secrets** | `doppler`, `1password` |
-| **Container** | `devcontainer`, `compose` |
-| **Database** | `postgres`, `mysql` |
-| **AI session** | `claude-sync`, `remote-control`, `none` |
-| **Sync target** | `local-folder`, `syncthing`, `s3` |
-| **At-rest encryption** | `age`, `gpg` (on by default when keys exist) |
+| `claude-native` | **Built-in.** Archives your Claude session, **age-encrypts** it, uploads to your sync target, and records a Doppler-anchored integrity hash. Enabled by `envbeam session setup`. |
+| `claude-sync` | Delegates to a separate `claude-sync` CLI (installed & authenticated by you) — envbeam just runs its `push`/`pull`; encryption & storage are that tool's concern. |
+| `remote-control` | No file sync — documents Claude Code Remote Control (one live session across surfaces). |
+| `none` | Disabled (default). |
 
-**S3 sync works with any S3-compatible provider** — the setup wizard asks which and pre-fills the endpoint & region:
+Storage & encryption (configured, not pluggable):
+
+| | Options |
+|---|---|
+| **Sync target** (DB snapshots + sessions) | `local-folder`, `syncthing`, `s3` |
+| **At-rest encryption** | `age` (default for snapshots once keys exist; **always** used for sessions) · `gpg` (snapshots only, with an explicit recipient) |
+| **Cross-machine registry** | `s3` only |
+
+**S3 works with any S3-compatible provider** — the setup wizard asks which and pre-fills the endpoint & region:
 
 > Cloudflare R2 · Hetzner Object Storage · Backblaze B2 · AWS S3 · any other S3-compatible bucket
 
-Need something else? [Third-party plugins](#plugins) drop into `~/.envbeam/plugins/`.
+Need a provider that isn't here? Write one — see [Extending envbeam](#extending-envbeam).
 
 ---
 
@@ -283,7 +300,7 @@ version: 1
 workspace: my-app
 secrets:  { provider: doppler, project: my-app, config: dev }
 database: { mode: snapshot, sync: { target: s3, keep: 5 } }
-session:  { provider: claude-sync }
+session:  { provider: claude-native }   # written for you by `envbeam session setup`
 ```
 
 Everything else — branch, container mode, DB engine/service, migrate command, secret keys — is detected. Run `envbeam config explain [field]` for docs on any field, or point Claude Code at the repo and let it edit the config, then `envbeam config validate`.
@@ -306,26 +323,56 @@ Then reference one in `.envbeam.yaml`, e.g. `git: { identity: github:work }`. To
 
 Powers the cross-machine project registry and S3-based session/DB sync. `envbeam storage setup` works with any S3-compatible provider — it asks which one and pre-fills endpoint & region. Credentials live as `ENVBEAM_S3_*` secrets in the `envbeam-global` Doppler project and are **reused** automatically if already present. For non-interactive setup, pass `--endpoint`, `--bucket`, `--region`, `--access-key`, `--secret-key`.
 
-### Plugins
-
-Third-party providers implement the same interface as the built-ins — a directory in `~/.envbeam/plugins/` whose entry exports a `ProviderFactory` (or array), or a `register(registry)` function:
-
-```js
-// ~/.envbeam/plugins/my-secrets/index.mjs
-export default [{ kind: 'secrets', name: 'vault', identityType: 'vault', create: () => new MyVaultProvider() }];
-```
-
-Interfaces are exported for type-safe authoring: `import type { SecretsProvider } from 'envbeam'`.
-
 ---
 
 ## Guarantees
 
 - **Local-only** — no hosted dev environment, no envbeam backend.
-- **Secrets never land in git** — materialized files are gitignored automatically.
-- **Database data boundary** — envbeam only shells out to `pg_dump`/`pg_restore`/`mysqldump`; the snapshot is the sole artifact, lives only where your config points, is **encrypted at rest by default**, and is integrity-checked against a Doppler-anchored hash before restore.
-- **Non-destructive by default** — no command discards uncommitted work or local DB state without confirmation or `--force`.
+- **Secrets never land in git** — the materialized `.env` (or run-wrapper) is written `0600` and added to `.gitignore` automatically.
+- **Database data boundary** — envbeam only shells out to `pg_dump`/`pg_restore`/`mysqldump`; the snapshot is the sole artifact, lives only where your config points, and is integrity-checked against a Doppler-anchored hash before restore.
+- **Encryption** — sessions are **always** age-encrypted (no key → not pushed). Snapshots are age-encrypted once keys exist (`envbeam session setup`); without keys, envbeam **warns loudly before** storing one unencrypted.
+- **Non-destructive by default** — no command discards uncommitted work or local DB state without confirmation or `--force`. `pull` only fast-forwards; a diverged or dirty tree stops it.
 - **Idempotent & observable** — `pull`/`status` re-run safely; `--dry-run`, ordered output, non-zero exit on failure.
+
+---
+
+## Extending envbeam
+
+Five provider kinds are pluggable: **`git`**, **`secrets`**, **`container`**, **`database`**, and **`session`**. (Sync targets, the config schema, and the S3 registry are built-in and not plugin-extensible.) A plugin is just a directory in `~/.envbeam/plugins/` that exports one or more provider factories — no fork, no rebuild of envbeam.
+
+**1. Implement the interface for your kind.** Each kind (`GitProvider`, `SecretsProvider`, `ContainerProvider`, `DatabaseProvider`, `SessionProvider`) is exported from the package, so your editor enforces the exact methods:
+
+```ts
+import type { SecretsProvider, ProviderContext } from 'envbeam';
+
+class VaultProvider implements SecretsProvider {
+  readonly kind = 'secrets' as const;
+  readonly name = 'vault';
+  requiredTools() {
+    return [{ command: 'vault', versionArgs: ['--version'], installHint: 'brew install vault' }];
+  }
+  async pull(ctx: ProviderContext) { /* … → { values, count } */ }
+  async materialize(ctx, pulled) { /* write the gitignored .env */ }
+  async status(ctx) { /* … */ }
+}
+```
+
+**2. Export a factory.** A `ProviderFactory` is `{ kind, name, create, identityType? }`. The plugin entry (its `package.json` `main`/`module`, or `index.{js,mjs,cjs}`) can export it any of three ways:
+
+```js
+// default export: one factory or an array
+export default [{ kind: 'secrets', name: 'vault', identityType: 'vault', create: () => new VaultProvider() }];
+
+// …or a named `providers` export (same shape)
+export const providers = [ /* factories */ ];
+
+// …or a register(registry) function for full control
+export function register(registry) {
+  registry.register({ kind: 'secrets', name: 'vault', create: () => new VaultProvider() });
+}
+```
+
+**3. Wire it up.** Name the provider in `.envbeam.yaml` (`secrets: { provider: vault }`); if it needs an account, add an identity whose `type` matches the factory's `identityType`. `envbeam doctor` lists every provider that loaded — including yours.
 
 ---
 
