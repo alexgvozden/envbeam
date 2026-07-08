@@ -1,7 +1,7 @@
 {
   "name": "envbeam",
   "version": "0.16.0",
-  "description": "Beam your whole dev environment to any machine or VM. Pause here, resume there: code + secrets + container + database + AI session, under the right account for each.",
+  "description": "Pause your work on one machine, resume it whole on another: code, secrets, container, database, and Claude session — under the right account for each.",
   "type": "module",
   "bin": {
     "envbeam": "dist/cli.js"

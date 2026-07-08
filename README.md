@@ -1,6 +1,6 @@
 # envbeam
 
-> **`env.beam`** — beam your whole dev environment to another machine. Pause here, resume there.
+> **`env.beam`** — pause your work on one machine, resume it whole on another. Code, secrets, database, container, and Claude session.
 
 <p>
   <img alt="version" src="https://img.shields.io/badge/version-0.16.0-blue">
