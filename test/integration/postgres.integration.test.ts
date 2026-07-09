@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { execSync } from 'node:child_process';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { RealCommandRunner } from '../../src/core/util/exec.js';
@@ -18,6 +19,24 @@ let cleanupTmp: (() => Promise<void>) | undefined;
 
 const PASSWORD = 'pgpw';
 
+// Restore requires the server major to be <= the host client major (a dump from a
+// newer pg_dump can emit directives an older server rejects, e.g. `transaction_timeout`
+// from PG17). Match the container to the host `pg_dump` so this holds on any machine;
+// override with PG_TEST_IMAGE if needed.
+function pgImage(): string {
+  if (process.env.PG_TEST_IMAGE) return process.env.PG_TEST_IMAGE;
+  try {
+    const out = execSync('pg_dump --version', { encoding: 'utf8' });
+    const major = out.match(/(\d+)(?:\.\d+)?/)?.[1];
+    if (major) return `postgres:${major}`;
+  } catch {
+    // fall through to a safe default
+  }
+  return 'postgres:16';
+}
+
+const PG_IMAGE = pgImage();
+
 async function dockerAvailable(): Promise<boolean> {
   if (!(await runner.which('docker'))) return false;
   // `docker info --format` can exit 0 with empty server version when the daemon
@@ -29,7 +48,7 @@ async function dockerAvailable(): Promise<boolean> {
 async function startPostgres(): Promise<{ id: string; url: string }> {
   const run = await runner.run(
     'docker',
-    ['run', '-d', '-e', `POSTGRES_PASSWORD=${PASSWORD}`, '-e', 'POSTGRES_DB=keeper', '-p', '127.0.0.1::5432', 'postgres:14'],
+    ['run', '-d', '-e', `POSTGRES_PASSWORD=${PASSWORD}`, '-e', 'POSTGRES_DB=keeper', '-p', '127.0.0.1::5432', PG_IMAGE],
     { allowFailure: true },
   );
   if (run.code !== 0) throw new Error(`docker run failed: ${run.stderr}`);
@@ -108,7 +127,7 @@ const SNAP: SnapshotOptions = {
   timestamp: '20260627T120000Z',
 };
 
-describe('postgres provider (real docker postgres:14)', () => {
+describe(`postgres provider (real docker ${PG_IMAGE})`, () => {
   it('reports reachable status, migrates, and detects change', async () => {
     if (!dockerOk || !pgDumpOk) return;
     const { dir, cleanup } = await tmpDir();

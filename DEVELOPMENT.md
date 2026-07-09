@@ -4,23 +4,24 @@ Working notes for continuing development across machines. If you just want to *u
 
 ---
 
-## Current status (2026-06-29)
+## Current status (2026-07-08, v0.16.0)
 
-**MVP complete and green; cross-machine registry shipped (v0.10.0).** Everything in PRD §§6–12 is implemented and tested.
+**MVP complete; cross-machine registry and at-rest integrity/encryption shipped.** Everything in PRD §§6–12 is implemented and tested.
 
-- 19 test files, **134 tests passing**, ~85% line coverage.
-- `npm run typecheck`, `npm run build`, `npm test` all pass.
+- 24 test files, **204 unit tests passing**. `npm run typecheck` and `npm run build` pass.
+- One integration test (`postgres:14` round trip) currently fails on this host due to a pg client/server version skew, not a code regression: the host `pg_dump` emits `SET transaction_timeout` (a Postgres 17+ parameter) that the `postgres:14` container rejects on restore. See the client-major-≥-server-major gotcha below; match the test container to your host client (or bump both) to run it green.
 
 ### Done
 - Two pipelines (`resume`/`pull`, `pause`/`push`) + `status`, all `--dry-run` capable.
 - Commands: `init`, `resume`, `pause`, `status`, `doctor`, `identity add/list/test/remove`, `config validate/explain/sync`, `storage setup/status`, `session setup/status`, `list`, `pull <project>`, `delete <project>`.
-- Providers (all behind swappable interfaces, plugin-loadable): git · doppler · onepassword · devcontainer · compose · postgres · mysql · claude-sync · remote-control · none.
-- Sync targets: local-folder · syncthing · s3, with optional age/gpg at-rest encryption.
+- Providers (all behind swappable interfaces, plugin-loadable): git, doppler, onepassword, devcontainer, compose, postgres, mysql, claude-native, claude-sync, remote-control, none.
+- Sync targets: local-folder, syncthing, s3. Snapshots are age-encrypted by default once keys exist (gpg optional); sessions are always age-encrypted.
+- **Doppler-anchored integrity hashes (v0.16.0):** every pushed artifact (encrypted DB snapshot, encrypted session archive, session metadata) records a `sha256` in a per-workspace manifest secret in the `envbeam-global` Doppler project. `pull`/`resume` verify before decrypt/restore and refuse on mismatch, so a tampered or rolled-back bucket object is detectable without Doppler write access.
 - Detect-first config (zod schema + published JSON Schema), global identities, OS-keychain/file credential store.
 - Cross-machine project registry in S3 (v0.9.0); `envbeam storage setup` is provider-agnostic (R2/Hetzner/Backblaze/AWS/any S3) with reuse of existing Doppler `ENVBEAM_S3_*` settings, mirrored as an import offer in `envbeam init` (v0.10.0).
 
 ### Pending / next
-- **P16 — live-account validation (optional).** Everything is tested via an injectable command runner + Docker-backed Postgres/Compose/Dev Containers. Validating against *real* accounts needs: a Doppler service token + project/config; a 1Password `OP_SERVICE_ACCOUNT_TOKEN`; S3 creds + bucket (only for live S3 — local-folder/Syncthing need nothing); and how `claude-sync` is installed/authenticated.
+- **P16 — live-account validation (optional).** Everything is tested via an injectable command runner + Docker-backed Postgres/Compose/Dev Containers. Validating against *real* accounts needs: a Doppler service token + project/config; a 1Password `OP_SERVICE_ACCOUNT_TOKEN`; S3 creds + bucket (only for live S3; local-folder/Syncthing need nothing); and how `claude-sync` is installed/authenticated.
 - **Post-MVP (PRD §14):** `resume all` across workspaces, TUI dashboard, pre/post hooks, encrypted working-tree sync, per-machine profiles.
 
 ---
@@ -67,7 +68,7 @@ npm test          # unit + integration (integration auto-skips absent tools)
 **Optional (only to run the real integration tests):**
 - **Docker** — for the Postgres / Compose / Dev Containers integration tests. They auto-skip when the daemon is down. On macOS the daemon must be running (`open -ga Docker`).
 - **`@devcontainers/cli`** — `npm i -g @devcontainers/cli` (for the devcontainer integration test).
-- **Postgres client 14** — host `pg_dump`/`psql` must be ≥ the server major version. The integration test uses `postgres:14` to match a Homebrew Postgres 14 client; bump both together if you upgrade.
+- **Postgres client** — host `pg_dump`/`psql` must be ≥ the server major version. The integration test now derives the container tag from the host `pg_dump` major (`postgres:<major>`), so it stays in lockstep on any machine; override with `PG_TEST_IMAGE` if you need a specific tag.
 
 Everything else (doppler, op, mysql, aws, age/gpg, claude-sync) is exercised through `FakeRunner` and is **not** required to develop or test.
 
@@ -90,7 +91,7 @@ Everything else (doppler, op, mysql, aws, age/gpg, claude-sync) is exercised thr
 (From PRD §13 open questions — see [planning/BUILD_PLAN.md](planning/BUILD_PLAN.md) for the full list.)
 
 - Secrets v1: **both** Doppler and 1Password ship; default `doppler`.
-- Session v1: `claude-sync` (default) + `remote-control` (docs/link) + `none`.
+- Session v1: `claude-native` (built-in, age-encrypted, integrity-hashed) + `claude-sync` (delegates to the external CLI) + `remote-control` (docs/link) + `none`. Default is `none` (opt-in via `envbeam session setup`).
 - Pause WIP: offer `--commit` or `--stash`; never auto-scratch-branch; refuse to lose work without `--force`.
 - Container on pause: leave running (`stopOnPause: false`).
 - Change-detection: prompt by default; `restore: auto` for non-interactive.
