@@ -8,8 +8,9 @@ Working notes for continuing development across machines. If you just want to *u
 
 **MVP complete; cross-machine registry and at-rest integrity/encryption shipped. Published to npm.** Everything in PRD §§6–12 is implemented and tested.
 
-- 27 test files, **241 tests passing** (unit + integration). `npm run typecheck` and `npm run build` pass.
-- Known gap: `planning/SYNC_SAFETY.md` documents four live data-loss paths in the staleness/divergence handling (DB restore, session pull) that are **not yet fixed**. See its Phase 0.
+- 31 test files, **363 tests passing** (unit + integration). `npm run typecheck` and `npm run build` pass.
+- `planning/SYNC_SAFETY.md` is **implemented** (v0.19.0–v0.24.2): every domain now has a lineage, `push`/`pull` refuse on divergence, and a push either publishes a coherent checkpoint or advances nothing. Its §13 records the bugs that only surfaced when two real machines ran against real storage — worth reading before adding a test that mocks the storage layer.
+- Known gaps, all listed in that document: retention can still prune a snapshot a checkpoint names (`pull` refuses rather than restoring the wrong one); `revision` is a single counter rather than per-domain; the MySQL provider does not truncate before a data-only restore; `pushWork` with `--commit` still runs `git add -A`.
 
 ### Done
 - Two pipelines (`resume`/`pull`, `pause`/`push`) + `status`, all `--dry-run` capable.
