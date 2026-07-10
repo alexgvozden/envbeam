@@ -245,4 +245,60 @@ describe(`postgres provider (real docker ${PG_IMAGE})`, () => {
       await cleanup();
     }
   }, 60_000);
+
+  /**
+   * A dump taken by a newer `pg_dump` opens with settings the server has never
+   * heard of — `transaction_timeout` arrived in PostgreSQL 17. Turning on
+   * ON_ERROR_STOP (above) means those aborted the restore before a single row
+   * loaded. They are preamble, not data, and must be dropped rather than obeyed.
+   */
+  it('tolerates settings a newer pg_dump emits that this server lacks', async () => {
+    if (!dockerOk || !pgDumpOk) return;
+    const { dir, cleanup } = await tmpDir();
+    try {
+      const provider = new PostgresProvider();
+      const ctx = pgCtx(dir);
+
+      await psql('DROP TABLE IF EXISTS seed_users');
+      await psql('CREATE TABLE seed_users(id serial primary key, name text)');
+
+      // A plain dump whose preamble names a GUC no server will ever have.
+      const dump = path.join(dir, 'future.sql');
+      await fs.writeFile(
+        dump,
+        [
+          'SET statement_timeout = 0;',
+          'SET envbeam_setting_from_the_future = 0;',
+          'SET client_encoding = \'UTF8\';',
+          'COPY public.seed_users (id, name) FROM stdin;',
+          '1\tada',
+          '2\tgrace',
+          '\\.',
+        ].join('\n') + '\n',
+      );
+
+      const res = await provider.restore(ctx, dump);
+      expect(res.restored).toBe(true);
+      expect(await psql('SELECT count(*) FROM seed_users')).toBe('2');
+    } finally {
+      await cleanup();
+    }
+  }, 60_000);
+
+  it('a real error is still fatal even when unknown settings are present', async () => {
+    if (!dockerOk || !pgDumpOk) return;
+    const { dir, cleanup } = await tmpDir();
+    try {
+      const provider = new PostgresProvider();
+      const ctx = pgCtx(dir);
+      const dump = path.join(dir, 'future-and-broken.sql');
+      await fs.writeFile(
+        dump,
+        'SET envbeam_setting_from_the_future = 0;\nCOPY public.definitely_not_a_table (id) FROM stdin;\n1\n\\.\n',
+      );
+      await expect(provider.restore(ctx, dump)).rejects.toThrow();
+    } finally {
+      await cleanup();
+    }
+  }, 60_000);
 });

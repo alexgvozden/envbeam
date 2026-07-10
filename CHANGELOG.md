@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.1] - 2026-07-10
+
+### Fixed
+- **A snapshot taken by a newer `pg_dump` now restores into an older server.** `pg_dump` opens every dump by setting session parameters, and it names ones that did not exist when the target server was released — `transaction_timeout` arrived in PostgreSQL 17, so a dump from client 18 aborts on a 16 server. Turning on `ON_ERROR_STOP` in 0.24.0 (which is what made a failed restore visible at all) turned that from a printed-and-ignored notice into a hard failure *before a single row loaded*. Those settings are preamble, not data: envbeam now asks the server which settings it actually has (`pg_settings` — not a hardcoded version table) and drops only the ones it does not. Real errors remain fatal. For custom-format archives, `pg_restore` is retried through the same path only when it fails with `unrecognized configuration parameter`, so the fast path is unchanged.
+- Dumps are scanned line by line rather than read into memory; a multi-gigabyte snapshot no longer has to fit in the heap to find its `COPY` statements.
+
 ## [0.24.0] - 2026-07-10
 
 More findings from the two-machine end-to-end run. The worst one: **`pull` reported restoring a snapshot it had not restored.**

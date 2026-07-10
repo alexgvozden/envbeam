@@ -1,4 +1,6 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, createReadStream, createWriteStream } from 'node:fs';
+import { createInterface } from 'node:readline';
+import { once } from 'node:events';
 import type { ProviderFactory } from '../registry.js';
 import type {
   DatabaseProvider,
@@ -123,24 +125,62 @@ export class PostgresProvider extends SqlDatabaseProvider {
     // with existing ones it fails outright. "Restore this snapshot" has to mean
     // the tables end up holding what the snapshot holds, so empty them first.
     const tables = isCustom ? await customFormatTables(ctx, file) : await plainFormatTables(file);
-    if (tables.length) await truncateTables(ctx, tables);
+    const emptyFirst = async () => {
+      if (tables.length) await truncateTables(ctx, tables);
+    };
+    await emptyFirst();
 
-    if (isCustom) {
-      // pg_restore requires an explicit -d target to load into a database.
-      const target = c.parts.url ?? c.parts.database;
-      if (!target) {
-        throw new Error('postgres restore needs a database (set PGDATABASE or a connection URL).');
-      }
-      await ctx.runner.run(
-        'pg_restore',
-        ['--no-owner', '--no-privileges', '--data-only', '--exit-on-error', '-d', target, file],
-        { env: c.env },
-      );
-    } else {
+    if (!isCustom) {
       // Without ON_ERROR_STOP, psql prints each error, keeps going, and exits 0.
       // A restore that applied nothing then reported success, and envbeam
       // advanced its sync base over a database it had never actually written.
-      await ctx.runner.run('psql', [...c.args, '-v', 'ON_ERROR_STOP=1', '-f', file], { env: c.env });
+      await this.applyPlainDump(ctx, file);
+      return;
+    }
+
+    // pg_restore requires an explicit -d target to load into a database.
+    const target = c.parts.url ?? c.parts.database;
+    if (!target) {
+      throw new Error('postgres restore needs a database (set PGDATABASE or a connection URL).');
+    }
+    const res = await ctx.runner.run(
+      'pg_restore',
+      ['--no-owner', '--no-privileges', '--data-only', '--exit-on-error', '-d', target, file],
+      { env: c.env, allowFailure: true },
+    );
+    if (res.code === 0) return;
+
+    // A dump taken with a NEWER pg_dump carries session settings the server has
+    // never heard of (`transaction_timeout` arrived in 17). `--exit-on-error`
+    // stops on the first one, before a single row is loaded. Those settings are
+    // preamble, not data: convert the archive to SQL, drop the settings this
+    // server doesn't have, and apply the rest — still stopping on real errors.
+    if (!/unrecognized configuration parameter/i.test(res.stderr)) {
+      throw new Error(`pg_restore failed: ${res.stderr.trim()}`);
+    }
+    ctx.logger.sub('snapshot was taken with a newer pg_dump — replaying it without the settings this server lacks');
+    const sqlFile = `${file}.plain.sql`;
+    try {
+      await ctx.runner.run(
+        'pg_restore',
+        ['--no-owner', '--no-privileges', '--data-only', '-f', sqlFile, file],
+        { env: c.env },
+      );
+      await emptyFirst(); // the aborted attempt may have loaded part of a table
+      await this.applyPlainDump(ctx, sqlFile);
+    } finally {
+      await fs.rm(sqlFile, { force: true }).catch(() => undefined);
+    }
+  }
+
+  /** Apply a plain-SQL dump, aborting on the first real error. */
+  private async applyPlainDump(ctx: ProviderContext, file: string): Promise<void> {
+    const c = conn(ctx);
+    const filtered = await stripUnknownSettings(ctx, file);
+    try {
+      await ctx.runner.run('psql', [...c.args, '-v', 'ON_ERROR_STOP=1', '-f', filtered ?? file], { env: c.env });
+    } finally {
+      if (filtered) await fs.rm(filtered, { force: true }).catch(() => undefined);
     }
   }
 
@@ -162,6 +202,58 @@ function quoteIdent(table: string): string {
     .join('.');
 }
 
+/** `SET foo = ...;` at the start of a line — pg_dump's preamble form. */
+const SET_LINE = /^SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|\bTO\b)/i;
+
+/**
+ * Drop `SET` statements naming a session setting this server does not have, and
+ * return the path of the rewritten file (or null when nothing needed dropping).
+ *
+ * A dump taken with a newer `pg_dump` opens with settings introduced after the
+ * target server was released — `transaction_timeout` landed in PostgreSQL 17.
+ * `psql` without `ON_ERROR_STOP` shrugged those off, which is also why it shrugged
+ * off the errors that mattered. We keep `ON_ERROR_STOP` and remove exactly the
+ * lines that are provably harmless: preamble settings the server cannot name.
+ * Which ones those are is a question for the server, not a version table.
+ */
+export async function stripUnknownSettings(ctx: ProviderContext, file: string): Promise<string | null> {
+  // pg_dump writes every SET in the preamble, so a short head read finds them
+  // all. A whole dump can be many gigabytes; it is never read into memory.
+  const wanted = new Set<string>();
+  for await (const line of readLines(file, 64 * 1024)) {
+    const m = line.match(SET_LINE);
+    if (m) wanted.add(m[1]!.toLowerCase());
+  }
+  if (!wanted.size) return null;
+
+  const c = conn(ctx);
+  const res = await ctx.runner.run(
+    'psql',
+    [...c.args, '-tAc', 'SELECT name FROM pg_settings'],
+    { env: c.env, allowFailure: true },
+  );
+  if (res.code !== 0) return null; // can't ask; leave the dump alone
+  const known = new Set(res.stdout.split(/\r?\n/).map((s) => s.trim().toLowerCase()).filter(Boolean));
+
+  const unknown = [...wanted].filter((n) => !known.has(n));
+  if (!unknown.length) return null;
+
+  ctx.logger.sub(`ignoring ${unknown.length} setting(s) this server does not have: ${unknown.join(', ')}`);
+  const out = `${file}.compat.sql`;
+  const sink = createWriteStream(out);
+  try {
+    for await (const line of readLines(file)) {
+      const m = line.match(SET_LINE);
+      if (m && unknown.includes(m[1]!.toLowerCase())) continue;
+      if (!sink.write(line + '\n')) await once(sink, 'drain');
+    }
+  } finally {
+    sink.end();
+    await once(sink, 'close');
+  }
+  return out;
+}
+
 /**
  * A schema-qualified table identifier we are willing to interpolate into SQL.
  * `pg_dump` emits plain `schema.table`; anything needing quotes (a name with a
@@ -172,17 +264,33 @@ export function isPlainTableIdent(name: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(name);
 }
 
-/** Tables a plain-SQL data dump loads into, read off its `COPY` statements. */
-export async function plainFormatTables(file: string): Promise<string[]> {
-  let text: string;
+/**
+ * Read `file` line by line without holding it in memory. `maxBytes` stops early,
+ * for callers that only need the head.
+ */
+async function* readLines(file: string, maxBytes = Infinity): AsyncGenerator<string> {
+  let stream: import('node:fs').ReadStream;
   try {
-    text = await fs.readFile(file, 'utf8');
+    stream = createReadStream(file, { encoding: 'utf8', end: maxBytes === Infinity ? undefined : maxBytes - 1 });
   } catch {
-    return [];
+    return;
   }
+  try {
+    for await (const line of createInterface({ input: stream, crlfDelay: Infinity })) yield line;
+  } catch {
+    /* unreadable — treat as empty */
+  }
+}
+
+/** Tables a plain-SQL data dump loads into, read off its `COPY`/`INSERT` statements. */
+export async function plainFormatTables(file: string): Promise<string[]> {
   const out = new Set<string>();
-  for (const m of text.matchAll(/^COPY\s+([^\s(]+)\s*\(/gm)) out.add(m[1]!);
-  for (const m of text.matchAll(/^INSERT\s+INTO\s+([^\s(]+)\s*[(\s]/gim)) out.add(m[1]!);
+  for await (const line of readLines(file)) {
+    const copy = line.match(/^COPY\s+([^\s(]+)\s*\(/);
+    if (copy) out.add(copy[1]!);
+    const insert = line.match(/^INSERT\s+INTO\s+([^\s(]+)\s*[(\s]/i);
+    if (insert) out.add(insert[1]!);
+  }
   return [...out].filter(isPlainTableIdent);
 }
 
