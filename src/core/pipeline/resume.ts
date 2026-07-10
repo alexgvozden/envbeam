@@ -18,6 +18,7 @@ import {
   type SnapshotEntry,
 } from '../sync/index.js';
 import { PreflightError, EnvbeamError } from '../util/errors.js';
+import { assertCanPull, type SyncStatus } from './guard.js';
 import { ensureTools } from '../util/tools.js';
 import { ensureDockerRunning } from '../util/docker.js';
 import { installRuntimeDeps, type DepsReport } from './deps.js';
@@ -26,6 +27,7 @@ import type { GitPullResult, MaterializeResult, ContainerStatus } from '../provi
 
 export interface ResumeReport {
   identity?: string;
+  sync?: SyncStatus;
   git?: GitPullResult & { branch: string; commit?: string };
   secrets?: { count: number; materialized?: MaterializeResult };
   deps?: DepsReport;
@@ -110,7 +112,11 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
     );
   }
 
-  // 2. Git
+  // 2. Sync guard — before git touches anything, so a refusal costs nothing.
+  log.step('Sync check');
+  report.sync = await assertCanPull(ctx, active, ctx.force);
+
+  // 3. Git
   log.step('Git');
   const gctx = ctx.providerCtx('git');
   const pull = await active.git.pull(gctx);
@@ -182,9 +188,42 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
     report.database = await resumeDatabase(ctx, active);
   }
 
-  // 7. Report
+  // 7. Advance the base — but only if we actually took in what the remote holds.
+  // A pull that skipped the git fast-forward (dirty tree) or declined a restore
+  // has NOT observed the remote checkpoint, and claiming otherwise would let the
+  // next push overwrite it while believing it was up to date.
+  await advanceBaseIfApplied(ctx, report);
+
+  // 8. Report
   printResumeReport(ctx, report);
   return report;
+}
+
+async function advanceBaseIfApplied(ctx: RunContext, report: ResumeReport): Promise<void> {
+  const sync = report.sync;
+  if (ctx.dryRun || !sync || sync.unavailable || sync.remoteRevision === 0) return;
+
+  const gitApplied =
+    !report.git || report.git.action === 'fast-forwarded' || report.git.action === 'up-to-date';
+  // "already at the latest snapshot" means the data is in place — that is applied.
+  const dbApplied =
+    !report.database?.restoreSkipped || report.database.restoreSkipped === 'already at the latest snapshot';
+
+  if (gitApplied && dbApplied) {
+    await patchState(ctx.workspaceRoot, { baseRevision: sync.remoteRevision });
+    return;
+  }
+  if (sync.remoteRevision > sync.baseRevision) {
+    ctx.logger.warn(
+      `pull did not fully apply remote revision ${sync.remoteRevision} — the sync base stays at r${sync.baseRevision}.`,
+    );
+    const why = [
+      gitApplied ? null : `git: ${report.git?.action}`,
+      dbApplied ? null : `database: ${report.database?.restoreSkipped}`,
+    ].filter(Boolean);
+    for (const w of why) ctx.logger.sub(pc.dim(`  ${w}`));
+    ctx.logger.hint('Resolve the above and pull again; until then `push` will refuse, since this machine is behind.');
+  }
 }
 
 /** Poll the DB until it accepts connections (best-effort, ~45s cap). */
@@ -443,6 +482,9 @@ function printResumeReport(ctx: RunContext, report: ResumeReport): void {
   log.step('Report');
   const lines: string[] = [];
   if (report.identity) lines.push(`identity:  ${report.identity}`);
+  if (report.sync && !report.sync.unavailable) {
+    lines.push(`sync:      ${report.sync.verdict} (base r${report.sync.baseRevision}, remote r${report.sync.remoteRevision})`);
+  }
   if (report.git) lines.push(`branch:    ${report.git.branch} (${report.git.action})`);
   if (report.secrets) lines.push(`secrets:   ${report.secrets.count} written to ${report.secrets.materialized?.path ?? '.env'}`);
   if (report.deps) {

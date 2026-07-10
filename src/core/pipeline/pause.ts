@@ -16,6 +16,7 @@ import {
   sha256File,
 } from '../sync/index.js';
 import { PreflightError } from '../util/errors.js';
+import { assertCanPush, type SyncStatus } from './guard.js';
 import { assertSecretsAuth } from './preflight.js';
 import { detectedValue, resolveBranch } from '../detect/types.js';
 import { ensureTools } from '../util/tools.js';
@@ -24,7 +25,15 @@ import { sessionSummary } from './format.js';
 import type { GitPushResult, SnapshotOptions } from '../providers/types.js';
 
 export interface PauseOptions {
+  /** Push even though uncommitted work would be left behind (a LOCAL risk). */
   force: boolean;
+  /**
+   * Push even though the remote holds a checkpoint this machine never saw (a
+   * REMOTE risk). Deliberately not `--force`: leaving dirty files behind and
+   * overwriting another machine's published state are different decisions, and
+   * consenting to the first must not silently consent to the second.
+   */
+  overwriteRemote?: boolean;
   /** true = force a snapshot, false = skip, undefined = auto (change-detection). */
   snapshot?: boolean;
   workMode: 'commit' | 'stash' | 'none';
@@ -32,6 +41,7 @@ export interface PauseOptions {
 }
 
 export interface PauseReport {
+  sync?: SyncStatus;
   git?: GitPushResult & { branch: string; commit?: string };
   database?: {
     snapshot?: { timestamp: string; file: string; sizeBytes: number };
@@ -55,6 +65,11 @@ export async function runPause(ctx: RunContext, opts: PauseOptions): Promise<Pau
   }
   const active = resolveActiveProviders(ctx);
   const report: PauseReport = {};
+
+  // Sync guard: the earliest point at which we can still abort cleanly. Once git
+  // has pushed, refusing costs more than it saves.
+  log.step('Sync check');
+  report.sync = await assertCanPush(ctx, active, opts.overwriteRemote ?? false);
 
   // Preflight: if two-way secrets sync will push to the provider, make sure we
   // can authenticate BEFORE touching git — otherwise git pushes and the run
@@ -350,6 +365,9 @@ function printPauseReport(ctx: RunContext, report: PauseReport): void {
   const log = ctx.logger;
   log.step('Report');
   const lines: string[] = [];
+  if (report.sync && !report.sync.unavailable) {
+    lines.push(`sync:      ${report.sync.verdict} (base r${report.sync.baseRevision}, remote r${report.sync.remoteRevision})`);
+  }
   if (report.git) {
     const bits = [
       report.git.committed ? 'committed' : null,

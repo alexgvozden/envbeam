@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-07-10
+
+Phase 3 of `planning/SYNC_SAFETY.md`: the guards. Both pipelines now compute where this machine stands relative to the remote **before** touching anything, and refuse the operations that would destroy state nobody else has a copy of.
+
+### Added
+- **`core/pipeline/guard.ts`** — `syncStatus()` returns one of five verdicts by comparing the local `baseRevision` against the registry's `revision`, and listing what moved locally (uncommitted files, unpushed commits, changed database data, hand-edited `.env`):
+
+  | verdict | meaning | default |
+  |---|---|---|
+  | `first-sync` | nothing in the registry yet | proceed |
+  | `in-sync` | neither side moved | proceed |
+  | `ahead` | only we moved | push proceeds; pull says "nothing to pull" |
+  | `behind` | only the remote moved | pull fast-forwards; **push refuses** |
+  | `diverged` | both moved | **stop, explain, ask** |
+
+- **`assertCanPush` runs first in `runPause`**, before git — the last point where aborting is free. It refuses on `behind` as well as `diverged`: a machine offline for a week has *no local changes*, and that is exactly why publishing its week-old snapshot and session archive is dangerous (**D2**). Escape hatch: `envbeam push --overwrite-remote`.
+- **`assertCanPull` runs first in `runResume`.** A `diverged` pull prompts, and — since `AutoPrompter.confirm` answers yes to everything — **refuses outright when non-interactive** rather than letting `--yes` stand in for consent. Escape hatch: `envbeam pull --force`.
+- **`--overwrite-remote` is deliberately not `--force`.** On push the state at risk is the *remote*; on pull it is the *local* machine. Consenting to leave uncommitted files behind (`push --force`) must not silently consent to overwriting another machine's published checkpoint. This answers open question §12.5.
+- **Both guards run under `--dry-run`** and print the verdict they would have acted on ("a real push would be refused here"), which is how you check safety before committing to a push.
+- The verdict appears in the run report: `sync: behind (base r3, remote r5)`.
+
+### Changed
+- **`push` claims its expected revision** when writing the registry (`registerProject(entry, {expectedRevision})`), so a remote that moves *during* a push is caught too, and records the granted revision as the new base.
+- **`pull` advances `baseRevision` only if it actually applied the remote checkpoint.** A pull that skipped the git fast-forward (dirty tree) or declined a snapshot restore has not observed the remote; it now says so, leaves the base where it was, and `push` keeps refusing until it's resolved. This is the §9 partial-apply report, arriving early.
+- The guard degrades quietly when the registry can't be consulted (offline, `ENVBEAM_DISABLE_STORAGE`, no global storage): it reports `unavailable` and gets out of the way rather than blocking the pipeline.
+
 ## [0.20.0] - 2026-07-10
 
 Phase 2 of `planning/SYNC_SAFETY.md`: give the registry a total order that does not depend on any machine's clock, and stop concurrent pushes from silently deleting each other.

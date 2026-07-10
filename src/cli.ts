@@ -192,6 +192,7 @@ async function main(): Promise<void> {
     .alias('pause')
     .description('Push state so you can switch to another machine')
     .option('--force', 'proceed even if uncommitted work would be left behind')
+    .option('--overwrite-remote', 'push over a remote checkpoint this machine has not seen')
     .option('--snapshot', 'force a database snapshot')
     .option('--no-snapshot', 'skip the database snapshot')
     .option('--commit', 'commit dirty working changes before pushing')
@@ -202,6 +203,7 @@ async function main(): Promise<void> {
         await pushCommand({
           ...globalOpts(cmd),
           force: opts.force,
+          overwriteRemote: opts.overwriteRemote,
           snapshot: opts.snapshot === true ? true : undefined,
           noSnapshot: opts.snapshot === false ? true : undefined,
           commit: opts.commit,

@@ -6,6 +6,8 @@ import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './s
 import { createRegistryStore, type ProjectEntryInput } from '../core/registry/index.js';
 import { ensureStorageReady } from './storage.js';
 import { getMachineId } from '../core/util/machine.js';
+import { loadState, patchState } from '../core/state.js';
+import { SafetyError } from '../core/util/errors.js';
 import { detectedValue, resolveBranch } from '../core/detect/types.js';
 import type { Logger } from '../core/util/logger.js';
 import type { Prompter } from '../core/util/prompt.js';
@@ -95,6 +97,8 @@ Commit message:`;
 
 export interface PushCliOptions extends GlobalCliOptions {
   force?: boolean;
+  /** Overwrite a remote checkpoint this machine has never seen. */
+  overwriteRemote?: boolean;
   snapshot?: boolean;
   noSnapshot?: boolean;
   commit?: boolean;
@@ -176,6 +180,7 @@ export async function pushCommand(opts: PushCliOptions): Promise<number> {
 
     await runPause(ctx, {
       force,
+      overwriteRemote: opts.overwriteRemote,
       snapshot,
       workMode,
       message,
@@ -207,11 +212,28 @@ export async function pushCommand(opts: PushCliOptions): Promise<number> {
             : undefined,
         };
 
-        await store.registerProject(entry);
-        logger.sub(pc.dim(`Registered "${ctx.config.workspace}" in project registry.`));
+        // Claim the revision this machine last observed. If another machine has
+        // pushed since, this refuses rather than overwriting their checkpoint —
+        // the guard at the top of `runPause` catches that first, but the remote
+        // can also move while this push is running.
+        const state = await loadState(ctx.workspaceRoot);
+        const stored = await store.registerProject(
+          entry,
+          opts.overwriteRemote ? {} : { expectedRevision: state.baseRevision ?? 0 },
+        );
+        await patchState(ctx.workspaceRoot, { baseRevision: stored.revision });
+        logger.sub(pc.dim(`Registered "${ctx.config.workspace}" in project registry (r${stored.revision}).`));
       } catch (err) {
-        // Non-fatal - push succeeded, just warn about registry
-        logger.warn(`Could not update registry: ${(err as Error).message}`);
+        // The registry is not reachable, or it moved under us. Either way git,
+        // the snapshot, and the session archive are already published; failing
+        // the command now would be misleading. But a SafetyError means we chose
+        // NOT to advance the remote, and the user must know the push is partial.
+        if (err instanceof SafetyError) {
+          logger.warn(`Registry not advanced: ${err.message}`);
+          if (err.hint) logger.hint(err.hint);
+        } else {
+          logger.warn(`Could not update registry: ${(err as Error).message}`);
+        }
       }
     }
 
