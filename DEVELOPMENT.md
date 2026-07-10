@@ -8,9 +8,9 @@ Working notes for continuing development across machines. If you just want to *u
 
 **MVP complete; cross-machine registry and at-rest integrity/encryption shipped. Published to npm.** Everything in PRD §§6–12 is implemented and tested.
 
-- 32 test files, **373 tests passing** (unit + integration). `npm run typecheck` and `npm run build` pass.
+- 32 test files, **387 tests passing** (unit + integration). `npm run typecheck` and `npm run build` pass.
 - `planning/SYNC_SAFETY.md` is **implemented** (v0.19.0–v0.24.2): every domain now has a lineage, `push`/`pull` refuse on divergence, and a push either publishes a coherent checkpoint or advances nothing. Its §13 records the bugs that only surfaced when two real machines ran against real storage — worth reading before adding a test that mocks the storage layer.
-- Known gaps, all listed in that document: retention can still prune a snapshot a checkpoint names (`pull` refuses rather than restoring the wrong one), and `revision` is a single counter rather than per-domain.
+- One known gap, listed in that document: retention can still prune a snapshot a checkpoint names (`pull` refuses rather than restoring the wrong one).
 
 ### Done
 - Two pipelines (`resume`/`pull`, `pause`/`push`) + `status`, all `--dry-run` capable.

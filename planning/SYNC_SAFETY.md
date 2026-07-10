@@ -394,13 +394,33 @@ Small, high value, no schema change. Ship first.
    told that concurrent pushes are unsafe there. Refusing would make envbeam
    unusable on the storage its author actually pays for.
 
-3. **`revision` is enough for now; per-domain would be better.** The counter
-   reports divergence correctly but cannot say *which* domain diverged. In
-   practice the ahead/behind/diverged message lists the specific local changes
-   (`guard.ts:detectLocalChanges`), which recovers most of the precision a vector
-   clock would give, without the ordering machinery. Still worth doing.
+3. **Per-domain divergence — done in 0.26.0, and it needed no schema change.**
+   The question assumed a per-domain *revision map* in the registry. That was the
+   wrong shape. The checkpoint already names one artifact per domain
+   (`gitCommit`, `snapshotName`, `sessionName`, `secretsHash`), so recording the
+   checkpoint a machine last **observed** (`WorkspaceState.baseCheckpoint`) and
+   comparing it field by field answers "which domains did the remote move?"
+   exactly. Cross that with what moved locally and you have per-domain divergence
+   — no schema change, no migration.
 
-4. **Snapshot retention vs. divergence — still open, now visible.** `prune(keep)`
+   The cost of the counter was never imprecise *messages*; it was **over-blocking**.
+   An unpushed commit plus a remote that had pushed only a database snapshot was
+   reported as a full divergence and the whole pull refused. Now `pull`
+   fast-forwards the domains that agree and stops only where both sides moved the
+   same thing.
+
+   One trap, found by the two-machine rig within a minute: the comparison must be
+   checkpoint-against-checkpoint. `baseGitCommit` records where *this machine's*
+   HEAD ended up, and a commit pushed with plain `git push` moves it past the
+   commit the checkpoint names — comparing the two reports the remote as having
+   moved git forever after. `base*` says where we ended up; only `baseCheckpoint`
+   says what the remote said.
+
+   A true vector clock remains unnecessary: with per-domain attribution there is
+   nothing left for it to describe that the checkpoint does not already name.
+
+4. **Snapshot retention vs. divergence — still open, now visible.** *(The one
+   remaining gap in this document.)* `prune(keep)`
    can still delete a snapshot a checkpoint names. `pull` no longer restores a
    *different* snapshot when that happens: it refuses and says the checkpoint's
    snapshot is missing from the target. Pinning `baseSnapshotName` against
@@ -481,3 +501,4 @@ not "we found bugs" but *which kinds* of bug survive a green test suite.
 | R2 | registry | stale `configSnapshot` overwrites newer | **fixed** — `expectedRevision` | 0.20.0 |
 | R3 | registry | `lastPush` written, never read | **fixed** — `revision` orders; `lastPush` is metadata | 0.20.0 |
 | I1 | integrity | snapshot hash erased by the session push | **fixed** — prune scoped per artifact family | 0.23.2 |
+| §12.3 | guards | one counter refused pulls over domains that never conflicted | **fixed** — per-domain attribution via `baseCheckpoint` | 0.26.0 |
