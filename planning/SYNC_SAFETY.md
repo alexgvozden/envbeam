@@ -1,8 +1,12 @@
 # envbeam — Sync Safety: staleness, divergence, and lost updates
 
-> **Status:** Design proposal, not yet implemented.
+> **Status:** Implemented in v0.19.0–v0.24.2. All six phases of §11 shipped; the
+> open questions in §12 are answered below. This document is kept as the design
+> record — the rationale for each rule, and the reasoning behind the ones that
+> were changed once real machines exercised them.
 > **Scope:** `push` (pause) and `pull` (resume) across all five synced domains.
-> **Written against:** v0.17.0.
+> **Written against:** v0.17.0. **Verified against:** two machines, a real git
+> remote, real Hetzner Object Storage, real Doppler, two real Postgres servers.
 
 ---
 
@@ -367,37 +371,112 @@ Small, high value, no schema change. Ship first.
 
 ---
 
-## 12. Open questions
+## 12. Open questions — answered
 
-1. **`doppler secrets upload` semantics** — does it replace the config's secret set, or merge keys? This determines whether **S1** is *"B fails to add A's key"* (annoying) or *"B deletes A's key"* (data loss). Must be verified against the CLI before Phase 4. Everything else in §6 holds either way.
-2. **Conditional writes on non-AWS endpoints** — R2 and MinIO support for `If-Match` on `put-object` varies by version. Need a probe and a documented fallback. Is a warning acceptable, or should envbeam refuse to use a bucket that can't do CAS?
-3. **Is `revision` enough, or do we want a real vector clock?** A counter forces a total order and therefore *reports* divergence but cannot describe it precisely ("you both changed the DB" vs "you changed the DB, they changed secrets"). A per-domain revision map is strictly better and barely more code. Leaning toward per-domain.
-4. **Snapshot retention vs. divergence.** `prune(keep: 5)` (`pause.ts:324`) can delete the very snapshot a diverged machine needs as its merge base. Should a snapshot named by any known machine's `baseSnapshotName` be pinned against pruning?
-5. **Where does `--force` stop?** A force-push of a stale DB snapshot is a legitimate operation ("my local data is authoritative, discard theirs"). A force-restore over uncommitted local data is almost never what anyone wants. Should these share a flag?
+1. **`doppler secrets upload` semantics — resolved by removing the dependency.**
+   The question was whether a stale push *deletes* another machine's key or
+   merely fails to add it. It no longer matters: `push` re-pulls and uploads the
+   **merged union** (§6, `secrets/threeWay.ts`), which is safe under both
+   semantics — nothing is lost if upload replaces the set, and nothing is missed
+   if it merges. Deletions never propagate implicitly: a key gone from `.env` but
+   still in the provider is reported, not deleted. A question you can design
+   around is better than a question you have to answer.
+
+2. **Conditional writes on non-AWS endpoints — probed, and worse than expected.**
+   Hetzner Object Storage (Ceph RGW) honors `If-None-Match: *` correctly but
+   refuses `If-Match` with **412 even when the ETag matches**, and RGW's 412 body
+   has an empty `<Message/>` that aws-cli 2.x cannot parse — it dies with
+   `TypeError: argument of type 'NoneType' is not a container or iterable`. A
+   lost race and an unsupported header therefore produce *byte-identical stderr*,
+   so classification must come from **re-reading the object**, not the error
+   text. envbeam does not refuse such a bucket: creation stays race-safe (that's
+   `If-None-Match`), updates fall back to an unconditional write, and the user is
+   told that concurrent pushes are unsafe there. Refusing would make envbeam
+   unusable on the storage its author actually pays for.
+
+3. **`revision` is enough for now; per-domain would be better.** The counter
+   reports divergence correctly but cannot say *which* domain diverged. In
+   practice the ahead/behind/diverged message lists the specific local changes
+   (`guard.ts:detectLocalChanges`), which recovers most of the precision a vector
+   clock would give, without the ordering machinery. Still worth doing.
+
+4. **Snapshot retention vs. divergence — still open, now visible.** `prune(keep)`
+   can still delete a snapshot a checkpoint names. `pull` no longer restores a
+   *different* snapshot when that happens: it refuses and says the checkpoint's
+   snapshot is missing from the target. Pinning `baseSnapshotName` against
+   pruning remains unimplemented.
+
+5. **`--force` does not stop where `--overwrite-remote` starts.** They are
+   separate flags, because the state at risk is different. On `pull` the thing
+   about to be destroyed is *this machine's* data, so `--force`. On `push` it is
+   *the remote's* published checkpoint, so `--overwrite-remote`. Agreeing to
+   leave uncommitted files behind (`push --force`) must not silently agree to
+   overwrite another machine's work.
 
 ---
 
-## 13. Summary table
+## 13. What changed once real machines ran it
 
-| # | Domain | Case | Today | Decision |
+Every item below was invisible to the unit tests and surfaced within an hour of
+running two machines against real storage. They are listed because the lesson is
+not "we found bugs" but *which kinds* of bug survive a green test suite.
+
+- **`psql -f` prints errors, continues, and exits 0.** A data-only restore over a
+  table that still held rows collided on every primary key, wrote nothing, and
+  reported `restored snapshot from …`. envbeam then advanced its sync base over a
+  database it had never written. The integration test that should have caught it
+  truncated the table before restoring — testing the easy half of the operation.
+  Now: `ON_ERROR_STOP=1`, and the tables the dump loads into are emptied first,
+  so "restore this snapshot" means what it says.
+
+- **The integrity manifest erased itself.** One Doppler secret holds hashes for
+  both the database snapshot and the session archive, and each writer pruned it
+  against only *its own* live artifacts. `push` records the snapshot hash, then
+  the session step deletes it. Every `pull` since v0.16.0 has printed "no
+  integrity hash on record" and restored the snapshot unverified. The feature was
+  inert for its entire life, and no test noticed because no test ran both writers
+  in sequence.
+
+- **`ON_ERROR_STOP` then exposed version skew.** `pg_dump` 18 opens a dump by
+  setting `transaction_timeout`, which PostgreSQL 16 has never heard of. Making
+  real errors fatal made that fatal too. The fix is to ask the *server* which
+  settings it has rather than consulting a version table.
+
+- **Untracked files are not divergence, and neither is an edited `.env` under
+  `pull-only`.** Both made the guard refuse routine pulls. Divergence has to mean
+  both sides moved *the same shared state*; a stray file and a regenerable
+  artifact are neither.
+
+- **`push --snapshot` never recorded a change-detection fingerprint,** because
+  forcing a snapshot skips the branch that writes one. So the D4 divergence guard
+  had no baseline after a forced push, and the next `pull` would have restored
+  straight over locally-changed data — the exact bug D4 exists to prevent.
+
+---
+
+## 14. Summary table
+
+| # | Domain | Case | Today | Shipped in |
 |---|---|---|---|---|
 | G1 | git | `add -A` commits everything | as described | out of scope |
-| G2 | git | skipped pull doesn't stop DB restore | **incoherent state** | Phase 5 |
-| D1 | db | restores your own snapshot over newer local data | **data loss** | Phase 0 |
-| D2 | db | stale machine's snapshot wins by timestamp | **data loss** | Phase 4 |
-| D3 | db | clock skew inverts order | latent | Phase 2 (revision) |
-| D4 | db | restore clobbers unsaved local changes | **data loss** | Phase 0 |
-| D5 | db | fingerprint misses in-place updates | under-detects | wording + never suppress prompts |
-| S1 | secrets | two-way push from stale `.env` | lost update | Phase 4 (verify §12.1 first) |
-| S2 | secrets | `.env` overwritten silently on pull | local edits lost | Phase 4 |
-| S3 | secrets | no base recorded | blocks S1/S2 | Phase 1 |
-| S4 | secrets | 1Password `two-way` silently no-ops | misleading | validate at config load |
-| T1 | session | prefers a *stale* archive by design | **data loss** | Phase 0 |
-| T2 | session | never compares against local activity | **data loss** | Phase 0 |
-| T3 | session | whole-file replace truncates `.jsonl` | **data loss** | Phase 4 |
+| G2 | git | skipped pull doesn't stop DB restore | **fixed** — checkpoint's `gitCommit` must be an ancestor of HEAD | 0.23.0 |
+| D1 | db | restores your own snapshot over newer local data | **fixed** — `snapshotBase()` reads the push side too | 0.19.0 |
+| D2 | db | stale machine's snapshot wins by timestamp | **fixed** — `assertCanPush` refuses on `behind`; `snapshotLineageBlock` refuses the upload | 0.21.0, 0.22.0 |
+| D3 | db | clock skew inverts order | ordering is `revision`; the filename timestamp is for humans | 0.20.0 |
+| D4 | db | restore clobbers unsaved local changes | **fixed** — `hasChanged()` before restore, never auto, pre-restore dump | 0.19.0 |
+| D5 | db | fingerprint misses in-place updates | prompts say so; never used to suppress a confirmation | 0.19.0 |
+| D6 | db | *a failed restore reported success* | **fixed** — `ON_ERROR_STOP`; restore replaces rather than appends | 0.24.0 |
+| S1 | secrets | two-way push from stale `.env` | **fixed** — three-way merge, union upload | 0.22.0 |
+| S2 | secrets | `.env` overwritten silently on pull | **fixed** — hash, back up, confirm | 0.22.0 |
+| S3 | secrets | no base recorded | **fixed** — `secretsBase` (hashes only) | 0.19.1 |
+| S4 | secrets | 1Password `two-way` silently no-ops | **fixed** — config-load error | 0.22.0 |
+| T1 | session | prefers a *stale* archive by design | **fixed** — newest wins, whoever pushed it | 0.19.0 |
+| T2 | session | never compares against local activity | **fixed** — per-file for `project`, coarse guard for `global` | 0.19.0, 0.22.0 |
+| T3 | session | whole-file replace truncates `.jsonl` | **fixed** — prefix fast-forward, `.remote-<machine>` on divergence | 0.22.0 |
 | T4 | session | push is additive | safe | no change |
-| T5 | session | pull restores one archive; misses other machines' sessions | never converges | Phase 4 |
-| T6 | session | `memory/**` is shared + mutable; no merge rule | last-writer-wins | Phase 4 (explicit rule) |
-| R1 | registry | no CAS; concurrent push drops a project | **data loss** | Phase 2 |
-| R2 | registry | stale `configSnapshot` overwrites newer | config regression | Phase 3 |
-| R3 | registry | `lastPush` written, never read | dead metadata | Phase 2 |
+| T5 | session | pull restores one archive; misses other machines' sessions | **fixed** — union of the latest archive per machine | 0.22.0 |
+| T6 | session | `memory/**` is shared + mutable; no merge rule | **fixed** — newest wins, displaced bytes kept beside it | 0.22.0 |
+| R1 | registry | no CAS; concurrent push drops a project | **fixed where the endpoint allows it** — `If-Match` CAS, else warn (§12.2) | 0.20.0, 0.23.1 |
+| R2 | registry | stale `configSnapshot` overwrites newer | **fixed** — `expectedRevision` | 0.20.0 |
+| R3 | registry | `lastPush` written, never read | **fixed** — `revision` orders; `lastPush` is metadata | 0.20.0 |
+| I1 | integrity | snapshot hash erased by the session push | **fixed** — prune scoped per artifact family | 0.23.2 |
