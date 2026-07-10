@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.3] - 2026-07-10
+
+Closes the asymmetry 0.24.0 left behind: the Postgres provider replaced data on restore, the MySQL one still appended to it.
+
+### Fixed
+- **A MySQL data-only restore now replaces the data instead of appending to it.** `mysqldump --no-create-info` emits `INSERT` statements, so restoring a snapshot into tables that still hold rows collided on every primary key. The MySQL client does abort at the first error and exit non-zero — so unlike Postgres it never *reported* a phantom success — but the restore simply could not succeed against a database that had any data in it, which is the only case that matters when switching machines. The tables the dump loads into are now read off its `LOCK TABLES` / `INSERT INTO` statements (streamed, never held in memory) and truncated first.
+  - Foreign keys are disabled for the duration: `TRUNCATE` is refused outright on a table another table references, and the dump's tables reference each other in no order we can sort.
+  - Tables the database does not have yet are skipped rather than truncated — `TRUNCATE` on a missing table is an error, and a fresh clone restores before every migration has created every table.
+
+### Added
+- **`test/integration/mysql.integration.test.ts`** — a real `mysql:8` container, exercising conflicting-row restore, restore across a foreign key, restore into an empty table, gzipped round-trip, and failure reporting. Three of the seven fail against the previous code.
+  - The MySQL client tools are usually not installed on a developer machine, and this suite does not install them: it puts `mysql`/`mysqldump` shims on `PATH` that run the real clients *inside* the server container, over a bind-mount that gives host and container the same absolute paths. The provider runs unmodified. The suite skips cleanly when Docker is unavailable.
+
 ## [0.24.2] - 2026-07-10
 
 ### Fixed
