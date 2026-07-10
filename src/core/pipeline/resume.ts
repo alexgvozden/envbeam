@@ -20,7 +20,7 @@ import {
   type SnapshotEntry,
 } from '../sync/index.js';
 import { PreflightError, EnvbeamError } from '../util/errors.js';
-import { assertCanPull, type SyncStatus } from './guard.js';
+import { assertCanPull, observeCheckpoint, type SyncStatus } from './guard.js';
 import { ensureTools } from '../util/tools.js';
 import { ensureDockerRunning } from '../util/docker.js';
 import { installRuntimeDeps, type DepsReport } from './deps.js';
@@ -228,7 +228,12 @@ async function advanceBaseIfApplied(ctx: RunContext, report: ResumeReport): Prom
     !report.database?.restoreSkipped || report.database.restoreSkipped === 'already at the latest snapshot';
 
   if (gitApplied && dbApplied) {
-    await patchState(ctx.workspaceRoot, { baseRevision: sync.remoteRevision });
+    // Record what the remote SAID about itself, not just where we ended up: the
+    // next run compares checkpoint against checkpoint to see which domains moved.
+    await patchState(ctx.workspaceRoot, {
+      baseRevision: sync.remoteRevision,
+      ...(sync.checkpoint ? { baseCheckpoint: observeCheckpoint(sync.checkpoint) } : {}),
+    });
     return;
   }
   if (sync.remoteRevision > sync.baseRevision) {

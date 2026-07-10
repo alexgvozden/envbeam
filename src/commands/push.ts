@@ -7,6 +7,7 @@ import { createRegistryStore, type ProjectEntryInput } from '../core/registry/in
 import { ensureStorageReady } from './storage.js';
 import { getMachineId } from '../core/util/machine.js';
 import { loadState, patchState } from '../core/state.js';
+import { observeCheckpoint } from '../core/pipeline/guard.js';
 import { SafetyError } from '../core/util/errors.js';
 import { detectedValue, resolveBranch } from '../core/detect/types.js';
 import type { Logger } from '../core/util/logger.js';
@@ -238,20 +239,30 @@ export async function pushCommand(opts: PushCliOptions): Promise<number> {
 
         const state = await loadState(ctx.workspaceRoot);
         const gitBranch = resolveBranch(ctx.detection, ctx.config.git?.branch);
+        const previous = (await store.getProject(ctx.config.workspace))?.checkpoint;
 
-        // The checkpoint names ONLY what this push actually uploaded. `gitCommit`
-        // is the causal anchor: a puller checks that the code it is about to
-        // restore this data into descends from the commit the data was taken
-        // against (§10.4). Without a commit there is nothing to anchor to, so no
-        // checkpoint is written — the registry entry is still refreshed.
+        // A checkpoint describes the state of the world at its revision, not
+        // merely what this push happened to upload. A push that carried no
+        // database snapshot — nothing changed, or `--no-snapshot` — leaves the
+        // remote's authoritative snapshot exactly where the last checkpoint put
+        // it, so carry that name forward. The named artifact still exists on the
+        // sync target either way, which is what §9 requires; what it must not do
+        // is *forget* a domain and let a puller read that as "the remote never
+        // moved it". Per-domain divergence is a field-wise comparison against
+        // this, so a gap here reads as a lie.
+        //
+        // `gitCommit` is the causal anchor: a puller checks that the code it is
+        // about to restore this data into descends from the commit the data was
+        // taken against (§10.4). Without a commit there is nothing to anchor to,
+        // so no checkpoint is written — the registry entry is still refreshed.
         const checkpoint = report.git?.commit
           ? {
               revision: 0, // the store assigns the real one
               gitCommit: report.git.commit,
               gitBranch,
-              snapshotName: report.database?.snapshot?.file,
-              sessionName: report.session?.artifact,
-              secretsHash: state.secretsBase?.hash,
+              snapshotName: report.database?.snapshot?.file ?? previous?.snapshotName,
+              sessionName: report.session?.artifact ?? previous?.sessionName,
+              secretsHash: state.secretsBase?.hash ?? previous?.secretsHash,
               machineId,
               at: new Date().toISOString(),
             }
@@ -283,7 +294,10 @@ export async function pushCommand(opts: PushCliOptions): Promise<number> {
           entry,
           opts.overwriteRemote ? {} : { expectedRevision: state.baseRevision ?? 0 },
         );
-        await patchState(ctx.workspaceRoot, { baseRevision: stored.revision });
+        await patchState(ctx.workspaceRoot, {
+          baseRevision: stored.revision,
+          ...(stored.checkpoint ? { baseCheckpoint: observeCheckpoint(stored.checkpoint) } : {}),
+        });
         logger.sub(pc.dim(`Registered "${ctx.config.workspace}" in project registry (r${stored.revision}).`));
       } catch (err) {
         // The registry is not reachable, or it moved under us. Either way git,

@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0] - 2026-07-10
+
+Answers open question **§12.3** of `planning/SYNC_SAFETY.md`. The doc proposed replacing the single `revision` counter with a per-domain revision map, and called that a schema change. It isn't one: the checkpoint already names one artifact per domain, so recording the checkpoint we last *observed* and comparing it field by field gives the same answer with no schema change and no migration.
+
+### Changed
+- **Divergence is now attributed to the domains that actually diverged.** A single counter says *that* the remote moved, never *what*. So a machine holding an unpushed commit, whose remote had pushed only a database snapshot, was told the two had "BOTH changed" and the entire pull was refused — over work that was never in contention. `pull` now fast-forwards the domains that agree and stops only on the ones where both sides moved the same thing:
+
+  ```
+  ! this machine and the remote have BOTH changed database since they last synced (base r3, remote r5).
+        database: diverged — you changed it (data changed → ~7.4 MB, ~4 rows) and so did the remote
+        git, session: only the remote moved — would fast-forward
+  ```
+
+- **`WorkspaceState.baseCheckpoint`** records the remote checkpoint as it looked when we last observed it, written on every pull that applies and every push that registers. It is deliberately *not* the existing `base*` fields: those record where **this machine** ended up, and a commit pushed with plain `git push` moves `baseGitCommit` past whatever the checkpoint names — comparing the two would report the remote as having moved git forever after, and any local change would then read as divergence. Only a checkpoint can be compared with a checkpoint. (Caught by the end-to-end rig within a minute of writing the naive version.)
+- **A checkpoint now describes the state of the world at its revision**, not merely what one push uploaded: a push that carries no database snapshot re-states the previous checkpoint's `snapshotName` rather than blanking it. The named artifact still exists on the sync target, which is what §9 requires; what it must not do is *forget* a domain and let a puller read the gap as "the remote never moved it".
+- An **absent** checkpoint field is not evidence of movement. A push from a machine that never pulled has no `secretsHash`; a `migrations-only` project never has a `snapshotName`. Reading "absent" as "moved" would invent divergences, which is what this exists to stop — and each domain's own guard (D4, S2, T3) still refuses to overwrite anything without consent, so under-reporting here is safe and over-reporting is not.
+- Registry entries written before checkpoints existed, and machines that have not observed one yet, fall back to the coarse whole-project verdict and report no attribution rather than guessing at one. A single pull or push earns the precise answer.
+
+### Note
+`pull` still does not probe the database (it isn't reachable that early — container down, secrets unwritten), so a database divergence is caught by D4 once the container is up, not by the guard. `push` probes it and reports it up front.
+
 ## [0.25.0] - 2026-07-10
 
 `planning/SYNC_SAFETY.md` called G1 — `pushWork` running `git add -A` — "out of scope; worth its own issue." It is not a style nit. Reproduced:

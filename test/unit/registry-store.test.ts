@@ -329,3 +329,52 @@ describe('RegistryStore on a Ceph RGW endpoint (Hetzner)', () => {
     expect(s3.puts - before).toBe(1);
   });
 });
+
+/**
+ * A checkpoint describes the state of the world at its revision, not merely what
+ * one push uploaded. Per-domain divergence is a field-wise comparison against
+ * it, so a push that carried no snapshot must not blank `snapshotName` — a
+ * puller would read the gap as "the remote never moved the database".
+ */
+describe('checkpoint carries forward the domains a push did not touch', () => {
+  const withCheckpoint = (over: Record<string, unknown>): ProjectEntryInput => ({
+    ...entry('keeper'),
+    checkpoint: {
+      revision: 0,
+      gitCommit: 'a'.repeat(40),
+      gitBranch: 'main',
+      machineId: 'm1',
+      at: '2026-07-10T00:00:00Z',
+      ...over,
+    },
+  });
+
+  it('stamps the checkpoint with the revision the store actually assigned', async () => {
+    const s3 = new FakeS3(EMPTY_REGISTRY);
+    const store = storeOn(s3);
+    await store.registerProject(withCheckpoint({ snapshotName: 'S1' }));
+    const stored = await store.registerProject(withCheckpoint({ snapshotName: 'S2' }));
+    expect(stored.revision).toBe(2);
+    expect(stored.checkpoint?.revision).toBe(2);
+    expect(s3.parsed().projects.keeper!.revision).toBe(2);
+  });
+
+  it('keeps whatever the caller carried forward', async () => {
+    const s3 = new FakeS3(EMPTY_REGISTRY);
+    const store = storeOn(s3);
+    await store.registerProject(withCheckpoint({ snapshotName: 'S1', sessionName: 'Z1' }));
+
+    // A later push with no new snapshot re-states S1 (as `push.ts` does).
+    const next = await store.registerProject(withCheckpoint({ snapshotName: 'S1', sessionName: 'Z2' }));
+    expect(next.checkpoint?.snapshotName).toBe('S1');
+    expect(next.checkpoint?.sessionName).toBe('Z2');
+  });
+
+  it('leaves a domain absent when nothing has ever been pushed for it', async () => {
+    const s3 = new FakeS3(EMPTY_REGISTRY);
+    const store = storeOn(s3);
+    const stored = await store.registerProject(withCheckpoint({}));
+    expect(stored.checkpoint?.snapshotName).toBeUndefined();
+    expect(stored.checkpoint?.secretsHash).toBeUndefined();
+  });
+});

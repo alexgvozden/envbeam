@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import pc from 'picocolors';
 import type { RunContext } from './context.js';
 import type { resolveActiveProviders } from './providers.js';
-import { loadState } from '../state.js';
+import { loadState, type ObservedCheckpoint } from '../state.js';
 import { loadGlobalConfig } from '../config/globalConfig.js';
 import { RegistryStore } from '../registry/store.js';
 import type { Checkpoint, ProjectEntry } from '../registry/types.js';
@@ -30,12 +30,43 @@ export type SyncVerdict =
   /** Both moved. No timestamp can adjudicate this. Stop and ask. */
   | 'diverged';
 
+/** The four things envbeam syncs, each with its own notion of "moved". */
+export type SyncDomain = 'git' | 'database' | 'session' | 'secrets';
+
+/**
+ * Where one domain stands. A single `revision` counter says *that* the remote
+ * moved, never *what* it moved — so a machine that changed its database while
+ * the remote changed only secrets was told the two had diverged, and the whole
+ * pull was refused over work that was never in contention (SYNC_SAFETY.md §12.3).
+ *
+ * No registry schema change is needed to fix that. The checkpoint already names
+ * one artifact per domain — `gitCommit`, `snapshotName`, `sessionName`,
+ * `secretsHash` — so recording the checkpoint we last observed (`baseCheckpoint`)
+ * and comparing it field by field says which domains the remote moved. Crossing
+ * that with what moved locally says which ones actually diverged.
+ */
+export interface DomainVerdict {
+  domain: SyncDomain;
+  localMoved: boolean;
+  remoteMoved: boolean;
+  /** What moved locally, in words. Shown to the user. */
+  localDetail?: string;
+}
+
 export interface SyncStatus {
   verdict: SyncVerdict;
   /** The revision this machine last observed. */
   baseRevision: number;
   /** The revision now in the registry. */
   remoteRevision: number;
+  /** Per-domain breakdown. Empty when the remote has no checkpoint to compare. */
+  domains: DomainVerdict[];
+  /**
+   * Domains both sides moved. Empty when the verdict is not `diverged` — and
+   * also when a checkpoint-less registry entry left us unable to attribute the
+   * divergence to anything narrower than "shared state".
+   */
+  divergedDomains: SyncDomain[];
   /** Human-readable descriptions of what moved locally since the base. */
   localChanges: string[];
   /**
@@ -103,8 +134,8 @@ async function detectLocalChanges(
   ctx: RunContext,
   active: Active,
   opts: { probeDatabase: boolean },
-): Promise<{ changes: string[]; untracked: string[] }> {
-  const changes: string[] = [];
+): Promise<{ local: Map<SyncDomain, string>; untracked: string[] }> {
+  const local = new Map<SyncDomain, string>();
   const state = await loadState(ctx.workspaceRoot);
 
   const git = await active.git.status(ctx.providerCtx('git'));
@@ -112,18 +143,70 @@ async function detectLocalChanges(
   // any machine shares, so it cannot have diverged from anything — treating it
   // as divergence would turn every stray file into a refused pull.
   const trackedEdits = git.dirtyFiles.length - git.untrackedFiles.length;
-  if (trackedEdits > 0) changes.push(`${trackedEdits} uncommitted change(s) to tracked files`);
-  if (git.ahead > 0) changes.push(`${git.ahead} unpushed commit(s) on ${git.branch}`);
+  const gitDetail = [
+    trackedEdits > 0 ? `${trackedEdits} uncommitted change(s) to tracked files` : null,
+    git.ahead > 0 ? `${git.ahead} unpushed commit(s) on ${git.branch}` : null,
+  ].filter(Boolean);
+  if (gitDetail.length) local.set('git', gitDetail.join(', '));
 
   if (opts.probeDatabase && active.database && state.dbFingerprint && !ctx.dryRun) {
     const change = await active.database.hasChanged(ctx.providerCtx('database'), state.dbFingerprint);
-    if (change.changed) changes.push(`database data changed (${change.detail})`);
+    if (change.changed) local.set('database', `database data changed (${change.detail})`);
   }
 
-  if (await dotenvEdited(ctx)) changes.push('local edits to the materialized .env');
+  if (await dotenvEdited(ctx)) local.set('secrets', 'local edits to the materialized .env');
 
-  return { changes, untracked: git.untrackedFiles };
+  // Session changes are not probed: the session merge never destroys anything
+  // (T3 parks a diverged transcript beside yours), so nothing here needs to stop
+  // a pull on its account.
+
+  return { local, untracked: git.untrackedFiles };
 }
+
+/**
+ * Which domains the remote moved, by comparing its checkpoint against the
+ * checkpoint this machine last observed.
+ *
+ * It must be checkpoint-against-checkpoint. Comparing the remote's `gitCommit`
+ * against this machine's `baseGitCommit` looks equivalent and is not: a commit
+ * pushed outside envbeam moves HEAD past whatever the checkpoint names, so every
+ * later run would report the remote as having moved git while it stood still —
+ * and a machine with any local change would be told it had diverged. `base*`
+ * records where *we* ended up; only `baseCheckpoint` records what the *remote*
+ * said.
+ *
+ * An **absent** field on the remote checkpoint contributes no evidence. A push
+ * from a machine that never pulled has no `secretsHash`; a `migrations-only`
+ * project never has a `snapshotName`. Reading "absent" as "moved" would invent
+ * divergences, which is the very thing this exists to stop. Each domain's own
+ * guard (D4 for the database, S2 for secrets, T3 for sessions) still refuses to
+ * overwrite anything without consent, so under-reporting here is safe and
+ * over-reporting is not.
+ */
+function remoteMovement(remote: Checkpoint, base: ObservedCheckpoint): Map<SyncDomain, boolean> {
+  const moved = new Map<SyncDomain, boolean>();
+  const changed = (now: string | undefined, then: string | undefined): boolean =>
+    now !== undefined && now !== then;
+
+  moved.set('git', changed(remote.gitCommit, base.gitCommit));
+  moved.set('database', changed(remote.snapshotName, base.snapshotName));
+  moved.set('session', changed(remote.sessionName, base.sessionName));
+  moved.set('secrets', changed(remote.secretsHash, base.secretsHash));
+  return moved;
+}
+
+/** The subset of a checkpoint worth recording as "what the remote said". */
+export function observeCheckpoint(cp: Checkpoint): ObservedCheckpoint {
+  return {
+    revision: cp.revision,
+    gitCommit: cp.gitCommit,
+    snapshotName: cp.snapshotName,
+    sessionName: cp.sessionName,
+    secretsHash: cp.secretsHash,
+  };
+}
+
+const ALL_DOMAINS: SyncDomain[] = ['git', 'database', 'session', 'secrets'];
 
 /** Compute where we stand, without deciding what to do about it. */
 export async function syncStatus(
@@ -134,13 +217,16 @@ export async function syncStatus(
   const state = await loadState(ctx.workspaceRoot);
   const baseRevision = state.baseRevision ?? 0;
   const { entry, unavailable } = await readRemote(ctx);
-  const { changes: localChanges, untracked } = await detectLocalChanges(ctx, active, opts);
+  const { local, untracked } = await detectLocalChanges(ctx, active, opts);
+  const localChanges = [...local.values()];
 
   if (unavailable || !entry) {
     return {
       verdict: 'first-sync',
       baseRevision,
       remoteRevision: 0,
+      domains: [],
+      divergedDomains: [],
       localChanges,
       untracked,
       unavailable,
@@ -149,19 +235,63 @@ export async function syncStatus(
 
   // A machine that has never synced (base 0) but finds a populated registry is
   // behind, not in-sync — it has observed nothing of what's there.
-  const remoteMoved = entry.revision > baseRevision;
-  const verdict: SyncVerdict = remoteMoved
-    ? localChanges.length
-      ? 'diverged'
-      : 'behind'
-    : localChanges.length
-      ? 'ahead'
-      : 'in-sync';
+  const remoteAdvanced = entry.revision > baseRevision;
+
+  // Two ways to have nothing to compare field by field: the remote entry predates
+  // checkpoints (before 0.23.0), or this machine has not observed one yet. Either
+  // way, fall back to the coarse whole-project verdict. A single pull or push
+  // records a base checkpoint and the next run gets the precise answer.
+  if (!entry.checkpoint || !state.baseCheckpoint) {
+    const verdict: SyncVerdict = remoteAdvanced
+      ? localChanges.length
+        ? 'diverged'
+        : 'behind'
+      : localChanges.length
+        ? 'ahead'
+        : 'in-sync';
+    return {
+      verdict,
+      baseRevision,
+      remoteRevision: entry.revision,
+      domains: [],
+      // No attribution: claiming all four diverged would be a guess dressed as a
+      // finding. The checkpoint itself still travels — `resume` needs it for the
+      // coherence check regardless of whether we can compare it to anything.
+      divergedDomains: [],
+      localChanges,
+      untracked,
+      checkpoint: entry.checkpoint,
+    };
+  }
+
+  const moved = remoteMovement(entry.checkpoint, state.baseCheckpoint);
+  const domains: DomainVerdict[] = ALL_DOMAINS.map((domain) => ({
+    domain,
+    localMoved: local.has(domain),
+    // A remote that advanced its revision without moving any domain we can name
+    // still moved *something* we cannot see; don't claim it stood still.
+    remoteMoved: moved.get(domain) ?? false,
+    localDetail: local.get(domain),
+  }));
+
+  const divergedDomains = domains.filter((d) => d.localMoved && d.remoteMoved).map((d) => d.domain);
+  const anyRemote = domains.some((d) => d.remoteMoved) || remoteAdvanced;
+  const anyLocal = localChanges.length > 0;
+
+  const verdict: SyncVerdict = divergedDomains.length
+    ? 'diverged'
+    : anyRemote
+      ? 'behind'
+      : anyLocal
+        ? 'ahead'
+        : 'in-sync';
 
   return {
     verdict,
     baseRevision,
     remoteRevision: entry.revision,
+    domains,
+    divergedDomains,
     localChanges,
     untracked,
     checkpoint: entry.checkpoint,
@@ -189,11 +319,31 @@ function describe(ctx: RunContext, s: SyncStatus, action: 'push' | 'pull'): void
     case 'behind':
       log.sub(pc.dim(`behind the remote (${rev})`));
       break;
-    case 'diverged':
-      log.warn(`this machine and the remote have BOTH changed since they last synced (${rev}).`);
+    case 'diverged': {
+      const what = s.divergedDomains.length ? s.divergedDomains.join(', ') : 'shared state';
+      log.warn(`this machine and the remote have BOTH changed ${what} since they last synced (${rev}).`);
       break;
+    }
   }
-  for (const c of s.localChanges) log.sub(pc.dim(`  local: ${c}`));
+  // Name the domains that actually diverged, and the ones that did not. "Both
+  // sides changed something" is not actionable; "your database diverged, git and
+  // secrets fast-forward cleanly" is.
+  if (s.divergedDomains.length && s.domains.length) {
+    for (const d of s.domains.filter((d) => s.divergedDomains.includes(d.domain))) {
+      log.sub(pc.yellow(`  ${d.domain}: diverged — you changed it (${d.localDetail}) and so did the remote`));
+    }
+    const clean = s.domains.filter((d) => !s.divergedDomains.includes(d.domain) && d.remoteMoved);
+    if (clean.length) {
+      log.sub(pc.dim(`  ${clean.map((d) => d.domain).join(', ')}: only the remote moved — would fast-forward`));
+    }
+    const oursOnly = s.domains.filter((d) => d.localMoved && !d.remoteMoved);
+    if (oursOnly.length) {
+      log.sub(pc.dim(`  ${oursOnly.map((d) => d.domain).join(', ')}: only you moved — nothing to reconcile`));
+    }
+  } else {
+    for (const c of s.localChanges) log.sub(pc.dim(`  local: ${c}`));
+  }
+
   // Not divergence, but git will not fast-forward over them, so the checkpoint
   // may go unapplied. Worth a word before that happens silently.
   if (s.untracked.length && action === 'pull') {
@@ -239,12 +389,11 @@ export async function assertCanPush(ctx: RunContext, active: Active, overwriteRe
     return s;
   }
 
-  const noun = s.verdict === 'diverged' ? 'has diverged from' : 'is behind';
+  const revs = `base r${s.baseRevision}, remote r${s.remoteRevision}`;
   throw new SafetyError(
-    `Refusing to push: this machine ${noun} the remote (base r${s.baseRevision}, remote r${s.remoteRevision}).` +
-      (s.verdict === 'behind'
-        ? ' Its database snapshot and session archive are older than what is already published.'
-        : ''),
+    s.verdict === 'diverged'
+      ? `Refusing to push: this machine and the remote have both changed ${s.divergedDomains.join(', ') || 'shared state'} since they last synced (${revs}).`
+      : `Refusing to push: this machine is behind the remote (${revs}). Its database snapshot and session archive are older than what is already published.`,
     'Run `envbeam pull` to take in the remote checkpoint first, or `envbeam push --overwrite-remote` to make this machine authoritative.',
   );
 }
@@ -279,8 +428,9 @@ export async function assertCanPull(ctx: RunContext, active: Active, force: bool
     if (proceed) return s;
   }
 
+  const what = s.divergedDomains.length ? s.divergedDomains.join(', ') : 'shared state';
   throw new SafetyError(
-    `Refusing to pull: this machine and the remote have both changed since they last synced ` +
+    `Refusing to pull: this machine and the remote have both changed ${what} since they last synced ` +
       `(base r${s.baseRevision}, remote r${s.remoteRevision}).`,
     'Run `envbeam push` to publish your work first, or `envbeam pull --force` to discard it.',
   );

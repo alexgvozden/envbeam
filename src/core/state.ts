@@ -4,6 +4,19 @@ import { createHash } from 'node:crypto';
 import { stateDir } from './config/paths.js';
 import { ensureDir, readFileIfExists } from './util/fs.js';
 
+/**
+ * The domain-naming half of a registry checkpoint, recorded locally so a later
+ * run can ask which domains the remote moved. Structural on purpose: `state.ts`
+ * has no business depending on the registry's zod schema.
+ */
+export interface ObservedCheckpoint {
+  revision: number;
+  gitCommit?: string;
+  snapshotName?: string;
+  sessionName?: string;
+  secretsHash?: string;
+}
+
 /** Hashes of the secret set we last pulled. Never holds a plaintext value. */
 export interface SecretsBase {
   /** sha256 over the sorted `k=v` set — changes when any key or value changes. */
@@ -30,6 +43,18 @@ export interface WorkspaceState {
 
   /** Registry revision this machine last observed. Absent = never synced. */
   baseRevision?: number;
+  /**
+   * The remote checkpoint as it looked at `baseRevision` — what the remote *said*
+   * about itself when we last observed it.
+   *
+   * Distinct from the `base*` fields below, which record where this machine
+   * ended up. Asking "did the remote move its git?" by comparing the remote's
+   * `gitCommit` against our `baseGitCommit` conflates the two: a commit pushed
+   * outside envbeam moves our HEAD past the checkpoint, and every later pull
+   * would report the remote as having moved when it stood still. Only a
+   * checkpoint can be compared with a checkpoint.
+   */
+  baseCheckpoint?: ObservedCheckpoint;
   /** Full sha of the commit the base checkpoint names. */
   baseGitCommit?: string;
   /** File name of the snapshot our database currently reflects. */
