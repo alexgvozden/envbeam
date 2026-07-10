@@ -20,20 +20,34 @@ function isNotFound(stderr: string): boolean {
   return /\b404\b|NoSuchKey|does not exist|Not Found/i.test(stderr);
 }
 
-/** Our ETag no longer matches (or the key appeared under `--if-none-match '*'`). */
-export function isPreconditionFailed(stderr: string): boolean {
-  return /\b412\b|PreconditionFailed|\b409\b|ConditionalRequestConflict/i.test(stderr);
+/**
+ * The aws CLI refused the flag before sending anything. This is the only failure
+ * we can classify from stderr alone — see {@link classifyConditionalFailure} for
+ * why everything else is decided by looking at the object instead.
+ */
+export function isFlagRejectedLocally(stderr: string): boolean {
+  return /Unknown options?:.*--if-(match|none-match)|no such option|unrecognized arguments/i.test(stderr);
 }
 
 /**
- * The CLI or the endpoint doesn't do conditional writes. Old aws-cli rejects the
- * flag outright; S3-compatible endpoints answer 501 or reject the header.
+ * Why a conditional put failed, decided by re-reading the object rather than by
+ * parsing stderr.
+ *
+ * Parsing stderr does not work. Ceph RGW (Hetzner Object Storage, and others)
+ * answers a rejected conditional PUT with `412 PreconditionFailed` and an EMPTY
+ * `<Message/>` element, which aws-cli 2.x cannot parse — it dies with
+ * `TypeError: argument of type 'NoneType' is not a container or iterable` and
+ * exit 255. The same opaque message covers a genuine lost race, an unsupported
+ * header, and an unrelated 412. So we ask the object what happened:
+ *
+ * - `if-match`: if the live ETag differs from the one we conditioned on, someone
+ *   else wrote and we lost the race. If it is unchanged, the precondition *held*
+ *   and the write was still refused — the endpoint does not honor `If-Match`.
+ * - `if-none-match '*'`: if the object now exists, someone created it (a lost
+ *   race, which is the outcome we wanted). If it still does not, the header was
+ *   not honored.
  */
-export function isConditionalWriteUnsupported(stderr: string): boolean {
-  return /Unknown options?:.*--if-(match|none-match)|no such option|\b501\b|NotImplemented|InvalidArgument.*[Ii]f-[Mm]atch/i.test(
-    stderr,
-  );
-}
+export type ConditionalFailure = 'precondition' | 'unsupported' | 'error';
 
 /**
  * Registry store that syncs project registry to/from S3.
@@ -159,16 +173,48 @@ export class RegistryStore {
     }
   }
 
+  /** The live ETag of the registry object, or undefined if it does not exist. */
+  private async currentEtag(): Promise<string | undefined> {
+    const env = await this.getS3Env();
+    const res = await this.runner.run(
+      'aws',
+      ['s3api', 'head-object', '--bucket', this.storage.bucket, '--key', REGISTRY_FILE_NAME, ...this.baseArgs()],
+      { allowFailure: true, env },
+    );
+    if (res.code !== 0) return undefined;
+    try {
+      return (JSON.parse(res.stdout) as { ETag?: string }).ETag;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** See {@link ConditionalFailure} — decided by re-reading the object. */
+  private async classifyConditionalFailure(
+    cond: { ifMatch?: string; ifNoneMatch?: boolean },
+    stderr: string,
+  ): Promise<ConditionalFailure> {
+    if (isFlagRejectedLocally(stderr)) return 'unsupported';
+    const live = await this.currentEtag();
+    if (cond.ifMatch) {
+      if (live === undefined) return 'precondition'; // deleted under us; reload
+      return live === cond.ifMatch ? 'unsupported' : 'precondition';
+    }
+    if (cond.ifNoneMatch) {
+      return live === undefined ? 'unsupported' : 'precondition';
+    }
+    return 'error';
+  }
+
   /**
    * Write the registry, optionally only if the remote object still matches the
    * ETag we read (`ifMatch`), or only if it does not exist (`ifNoneMatch`).
-   * Reports a lost race as `{ ok: false, precondition: true }` rather than
-   * throwing, so the caller can reload and re-apply.
+   * A lost race is reported, not thrown, so the caller can reload and re-apply.
    */
   private async put(
     registry: ProjectRegistry,
     cond: { ifMatch?: string; ifNoneMatch?: boolean },
-  ): Promise<{ ok: true } | { ok: false; precondition: boolean; unsupported: boolean; stderr: string }> {
+  ): Promise<{ ok: true } | { ok: false; why: ConditionalFailure; stderr: string }> {
     const env = await this.getS3Env();
     const tmpFile = path.join(os.tmpdir(), `envbeam-registry-${process.pid}-${Date.now()}.json`);
     try {
@@ -189,12 +235,8 @@ export class RegistryStore {
 
       const res = await this.runner.run('aws', args, { allowFailure: true, env });
       if (res.code === 0) return { ok: true };
-      return {
-        ok: false,
-        precondition: isPreconditionFailed(res.stderr),
-        unsupported: isConditionalWriteUnsupported(res.stderr),
-        stderr: res.stderr,
-      };
+      if (!cond.ifMatch && !cond.ifNoneMatch) return { ok: false, why: 'error', stderr: res.stderr };
+      return { ok: false, why: await this.classifyConditionalFailure(cond, res.stderr), stderr: res.stderr };
     } finally {
       await fs.unlink(tmpFile).catch(() => {});
     }
@@ -252,12 +294,20 @@ export class RegistryStore {
       });
       registry.projects[entry.name] = next;
 
-      const res = await this.put(registry, etag ? { ifMatch: etag } : { ifNoneMatch: true });
-      if (res.ok) return next;
-
-      if (res.precondition) continue; // someone else wrote; reload and re-apply
-      if (res.unsupported) return this.registerWithoutCas(registry, next);
-
+      // An endpoint known not to honor If-Match (Ceph RGW / Hetzner) would
+      // "fail" every conditional put and burn all our attempts. Skip straight to
+      // the fallback. Creation still uses If-None-Match, which RGW *does* honor.
+      const cond = etag ? (this.ifMatchUsable === false ? {} : { ifMatch: etag }) : { ifNoneMatch: true };
+      const res = await this.put(registry, cond);
+      if (res.ok) {
+        if (cond.ifMatch) this.ifMatchUsable = true;
+        return next;
+      }
+      if (res.why === 'precondition') continue; // someone else wrote; reload and re-apply
+      if (res.why === 'unsupported') {
+        if (cond.ifMatch) this.ifMatchUsable = false;
+        return this.registerWithoutCas(registry, next);
+      }
       throw new EnvbeamError(`Failed to save registry to S3: ${res.stderr}`, { exitCode: 2 });
     }
     throw new EnvbeamError(
@@ -267,33 +317,45 @@ export class RegistryStore {
   }
 
   /**
-   * Fallback for endpoints without conditional writes (some MinIO/R2 versions):
-   * write unconditionally, then read back and verify nothing we saw disappeared.
-   * This cannot *prevent* a lost update — it can only tell the user one happened,
-   * which is strictly better than the silence R1 describes.
+   * Fallback for endpoints that do not honor `If-Match` on PUT — which includes
+   * Ceph RGW, and therefore Hetzner Object Storage, where a conditional put is
+   * refused with 412 even when the ETag matches.
+   *
+   * Write unconditionally, then read back and check our own entry landed. This
+   * **cannot prevent R1**: a project another machine created between our read
+   * and our write was never in our copy, so its loss is neither preventable nor
+   * detectable here. Say so, once, rather than implying safety we don't have.
    */
   private async registerWithoutCas(registry: ProjectRegistry, entry: ProjectEntry): Promise<ProjectEntry> {
-    this.warnedNoCas ||= true;
-    const expected = Object.keys(registry.projects).sort();
+    this.usedUnconditionalWrite = true;
     await this.save(registry);
 
     const after = await this.load();
-    const lost = expected.filter((n) => !(n in after.projects));
-    if (lost.length || after.projects[entry.name]?.revision !== entry.revision) {
+    if (after.projects[entry.name]?.revision !== entry.revision) {
       throw new EnvbeamError(
-        `The storage endpoint does not support conditional writes, and a concurrent push raced this one.` +
-          (lost.length ? ` Project(s) dropped from the registry: ${lost.join(', ')}.` : ''),
+        `The registry was overwritten by another machine while this push was writing it.`,
         {
           exitCode: 2,
-          hint: 'Re-run `envbeam push`. To prevent this, use a bucket whose endpoint supports S3 conditional writes (If-Match).',
+          hint: 'Re-run `envbeam push`. This endpoint cannot do compare-and-swap, so concurrent pushes are unsafe.',
         },
       );
     }
     return entry;
   }
 
+  /**
+   * Whether this endpoint honors `If-Match` on put-object. Undefined until the
+   * first conditional write tells us. Cached for the life of the store.
+   */
+  private ifMatchUsable?: boolean;
+
   /** True once a write had to fall back to a non-conditional put. */
-  warnedNoCas = false;
+  usedUnconditionalWrite = false;
+
+  /** Whether writes to this registry are protected against concurrent pushes. */
+  get conditionalWritesSupported(): boolean | undefined {
+    return this.ifMatchUsable;
+  }
 
   /** Unregister a project by name. Returns true if found and removed. */
   async unregisterProject(name: string): Promise<boolean> {
@@ -302,10 +364,12 @@ export class RegistryStore {
       if (!(name in registry.projects)) return false;
       delete registry.projects[name];
 
-      const res = await this.put(registry, etag ? { ifMatch: etag } : {});
+      const cond = etag && this.ifMatchUsable !== false ? { ifMatch: etag } : {};
+      const res = await this.put(registry, cond);
       if (res.ok) return true;
-      if (res.precondition) continue;
-      if (res.unsupported) {
+      if (res.why === 'precondition') continue;
+      if (res.why === 'unsupported') {
+        this.ifMatchUsable = false;
         await this.save(registry);
         return true;
       }
@@ -354,8 +418,8 @@ export class RegistryStore {
     const created = await this.put(EMPTY_REGISTRY, { ifNoneMatch: true });
     if (created.ok) return true;
     // Someone created it in the window. That is the outcome we wanted anyway.
-    if (created.precondition) return false;
-    if (created.unsupported) {
+    if (created.why === 'precondition') return false;
+    if (created.why === 'unsupported') {
       await this.save(EMPTY_REGISTRY);
       return true;
     }

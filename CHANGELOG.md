@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.1] - 2026-07-10
+
+Answers open question **§12.2** of `planning/SYNC_SAFETY.md` by probing a real S3-compatible endpoint, and fixes what that revealed.
+
+**Finding.** Hetzner Object Storage (Ceph RGW) honors `If-None-Match: *` correctly — create when absent (200), refuse when present (412) — but refuses `If-Match` with **412 even when the ETag matches**. Worse, RGW's 412 body carries an empty `<Message/>`, which aws-cli 2.x cannot parse: it dies with `TypeError: argument of type 'NoneType' is not a container or iterable` and exit 255. A genuine lost race and an unsupported header therefore produce **byte-identical stderr**.
+
+### Fixed
+- **Conditional-write failures are classified by re-reading the object, not by parsing stderr.** 0.20.0's regexes matched neither of the two messages Hetzner actually produces, so `registerProject` would have thrown `Failed to save registry to S3` on every push and the registry would never have advanced. The store now asks the object what happened: for `If-Match`, a *changed* ETag means we lost a race (reload and re-apply), while an *unchanged* ETag means the precondition held and the write was refused anyway — the endpoint does not support it. For `If-None-Match`, the object existing means someone else created it.
+- **An endpoint that refuses `If-Match` is remembered**, so subsequent pushes go straight to the fallback instead of burning five retries and then reporting "it is being written concurrently", which would have been a lie.
+- The non-CAS fallback no longer claims to detect a dropped project. It cannot: a project another machine created between our read and our write was never in our copy, so its loss is neither preventable nor detectable. It verifies that *our own* entry landed, and says plainly that concurrent pushes are unsafe on this endpoint. Registry **creation** is still race-safe there, since `If-None-Match` works.
+
 ## [0.23.0] - 2026-07-10
 
 Phase 5 of `planning/SYNC_SAFETY.md`: the sleeper. Every earlier phase treats a domain in isolation; the worse bug is that envbeam's steps can **partially apply**, producing a state no machine was ever in.

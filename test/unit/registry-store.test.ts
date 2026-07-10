@@ -32,6 +32,12 @@ class FakeS3 {
   onAfterPut?: () => void;
   /** Make put-object behave like an endpoint with no conditional-write support. */
   conditionalWrites = true;
+  /**
+   * Reproduce Ceph RGW / Hetzner: `--if-none-match` is honored, `--if-match` is
+   * refused with 412 even when the ETag matches, and aws-cli mangles the empty
+   * <Message/> into an opaque TypeError. No stderr regex can tell these apart.
+   */
+  cephRgw = false;
 
   constructor(initial?: unknown) {
     if (initial !== undefined) this.write(JSON.stringify(initial, null, 2));
@@ -54,6 +60,13 @@ class FakeS3 {
       },
     );
     runner.on(
+      (c, a) => c === 'aws' && a[0] === 's3api' && a[1] === 'head-object',
+      () =>
+        this.content === null
+          ? { code: 1, stderr: 'An error occurred (404) Not Found' }
+          : { stdout: JSON.stringify({ ETag: this.etag }) },
+    );
+    runner.on(
       (c, a) => c === 'aws' && a[0] === 's3api' && a[1] === 'put-object',
       (_c, a) => {
         const ifMatch = a.includes('--if-match') ? a[a.indexOf('--if-match') + 1] : undefined;
@@ -62,13 +75,18 @@ class FakeS3 {
         if (!this.conditionalWrites && (ifMatch || ifNoneMatch)) {
           return { code: 255, stderr: 'Unknown options: --if-match' };
         }
+        // Verbatim from `aws s3api put-object --if-match <correct etag>` against
+        // Hetzner Object Storage with aws-cli 2.35.
+        const OPAQUE = "aws: [ERROR]: argument of type 'NoneType' is not a container or iterable";
+        if (this.cephRgw && ifMatch) return { code: 255, stderr: OPAQUE };
+
         this.onBeforePut?.();
 
         if (ifMatch && ifMatch !== this.etag) {
-          return { code: 254, stderr: 'An error occurred (PreconditionFailed) ... 412' };
+          return { code: 254, stderr: this.cephRgw ? OPAQUE : 'An error occurred (PreconditionFailed) ... 412' };
         }
         if (ifNoneMatch && this.content !== null) {
-          return { code: 254, stderr: 'An error occurred (PreconditionFailed) ... 412' };
+          return { code: 254, stderr: this.cephRgw ? OPAQUE : 'An error occurred (PreconditionFailed) ... 412' };
         }
         const body = a[a.indexOf('--body') + 1]!;
         this.write(readFileSync(body, 'utf8'));
@@ -233,17 +251,16 @@ describe('RegistryStore without conditional-write support', () => {
     const store = storeOn(s3);
     const written = await store.registerProject(entry('keeper'));
     expect(written.revision).toBe(1);
-    expect(store.warnedNoCas).toBe(true);
+    expect(store.usedUnconditionalWrite).toBe(true);
     expect(s3.parsed().projects.keeper!.revision).toBe(1);
   });
 
-  it('detects, after the fact, that a concurrent write dropped a project', async () => {
+  it('detects, after the fact, that a concurrent write clobbered ours', async () => {
     const s3 = new FakeS3(EMPTY_REGISTRY);
     s3.conditionalWrites = false;
     const store = storeOn(s3);
-    await store.registerProject(entry('other'));
 
-    // Another machine clobbers the object right after our unconditional put,
+    // Another machine overwrites the object right after our unconditional put,
     // before we read it back. Nothing can prevent this — only report it.
     let done = false;
     s3.onAfterPut = () => {
@@ -253,7 +270,62 @@ describe('RegistryStore without conditional-write support', () => {
     };
     const err = await store.registerProject(entry('keeper')).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(EnvbeamError);
-    expect((err as Error).message).toMatch(/does not support conditional writes/);
-    expect((err as Error).message).toMatch(/dropped from the registry: keeper, other/);
+    expect((err as Error).message).toMatch(/overwritten by another machine/);
+  });
+});
+
+// Verified against the real endpoint: Hetzner Object Storage (Ceph RGW) honors
+// `If-None-Match: *` but refuses `If-Match` with 412 even when the ETag matches,
+// and aws-cli 2.x turns its empty <Message/> into an opaque TypeError. Both
+// failures therefore produce the SAME stderr, so classification must come from
+// re-reading the object, not from the error text.
+describe('RegistryStore on a Ceph RGW endpoint (Hetzner)', () => {
+  it('creates the registry with if-none-match, which RGW does honor', async () => {
+    const s3 = new FakeS3();
+    s3.cephRgw = true;
+    const store = storeOn(s3);
+    expect((await store.registerProject(entry('keeper'))).revision).toBe(1);
+    expect(store.conditionalWritesSupported).toBeUndefined(); // never tried if-match
+  });
+
+  it('recognizes a refused if-match as UNSUPPORTED, not as a lost race', async () => {
+    const s3 = new FakeS3(EMPTY_REGISTRY);
+    s3.cephRgw = true;
+    const store = storeOn(s3);
+    // The ETag is unchanged, so the precondition held and the write was still
+    // refused. Retrying would fail identically five times and then throw
+    // "being written concurrently", which would be a lie.
+    const written = await store.registerProject(entry('keeper'));
+    expect(written.revision).toBe(1);
+    expect(store.conditionalWritesSupported).toBe(false);
+    expect(store.usedUnconditionalWrite).toBe(true);
+    expect(s3.parsed().projects.keeper!.revision).toBe(1);
+  });
+
+  it('still distinguishes a genuine lost race by the changed ETag', async () => {
+    const s3 = new FakeS3(EMPTY_REGISTRY);
+    const store = storeOn(s3); // supports if-match
+    let raced = false;
+    s3.onBeforePut = () => {
+      if (raced) return;
+      raced = true;
+      const reg = JSON.parse(s3.content!);
+      reg.projects.other = { ...entry('other'), revision: 1 };
+      s3.write(JSON.stringify(reg)); // new ETag
+    };
+    await store.registerProject(entry('keeper'));
+    expect(store.conditionalWritesSupported).toBe(true);
+    expect(Object.keys(s3.parsed().projects).sort()).toEqual(['keeper', 'other']);
+  });
+
+  it('does not retry if-match once it knows the endpoint refuses it', async () => {
+    const s3 = new FakeS3(EMPTY_REGISTRY);
+    s3.cephRgw = true;
+    const store = storeOn(s3);
+    await store.registerProject(entry('keeper'));
+    const before = s3.puts;
+    await store.registerProject(entry('keeper'));
+    // Exactly one put on the second call: straight to the unconditional write.
+    expect(s3.puts - before).toBe(1);
   });
 });
