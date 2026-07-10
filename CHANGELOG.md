@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-07-10
+
+`planning/SYNC_SAFETY.md` called G1 — `pushWork` running `git add -A` — "out of scope; worth its own issue." It is not a style nit. Reproduced:
+
+```
+$ envbeam push --yes          # api-key.txt is untracked and not gitignored
+    committed working changes
+    pushed main → origin
+$ git log -p --all | grep sk-live
+sk-live-DO-NOT-COMMIT         # now in the remote's history, unprompted
+```
+
+### Security
+- **`push` no longer sweeps untracked files into a commit it then pushes.** `git add -A` staged every file git had never seen — a `.env.local`, an `api-key.txt` nobody remembered to gitignore — and `pushWork` published the commit. Under `--yes` this happened with no prompt at all, because `AutoPrompter.select` returns the default choice, which was "Commit them". A push is not undoable, and neither is history. Untracked files are now staged **only on an explicit yes**:
+  - **Interactive:** tracked and untracked files are listed *separately*, and "Commit everything" stays the default — a new source file is work too, and you have just been shown the list. Someone who spots a stray secret there can now choose "Commit only the tracked change(s)".
+  - **Non-interactive (`--yes`):** commits the tracked changes, leaves untracked files alone, and names each one it did not carry. `--yes` means "don't ask me the routine questions", not "publish whatever is lying around" — the same rule the pull-side divergence guard follows.
+  - **`--include-untracked`** opts in explicitly, for scripted pushes that really do want new files carried.
+- `GitPushResult.untrackedLeftBehind` reports what was skipped, so `push` can say so rather than let you discover it on the other machine.
+
+### Removed
+- **`src/commands/pause.ts` and `src/commands/resume.ts`**, which nothing imported. The CLI has always used `push`/`pull` with `pause`/`resume` as aliases. These were stale copies carrying the old `add -A` path and none of this release line's guards — a trap for whoever wired them up next.
+
 ## [0.24.3] - 2026-07-10
 
 Closes the asymmetry 0.24.0 left behind: the Postgres provider replaced data on restore, the MySQL one still appended to it.

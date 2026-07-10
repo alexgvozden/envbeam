@@ -193,6 +193,7 @@ async function main(): Promise<void> {
     .description('Push state so you can switch to another machine')
     .option('--force', 'proceed even if uncommitted work would be left behind')
     .option('--overwrite-remote', 'push over a remote checkpoint this machine has not seen')
+    .option('--include-untracked', 'also commit files git has never seen (they will be pushed)')
     .option('--snapshot', 'force a database snapshot')
     .option('--no-snapshot', 'skip the database snapshot')
     .option('--commit', 'commit dirty working changes before pushing')
@@ -204,6 +205,7 @@ async function main(): Promise<void> {
           ...globalOpts(cmd),
           force: opts.force,
           overwriteRemote: opts.overwriteRemote,
+          includeUntracked: opts.includeUntracked,
           snapshot: opts.snapshot === true ? true : undefined,
           noSnapshot: opts.snapshot === false ? true : undefined,
           commit: opts.commit,

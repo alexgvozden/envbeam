@@ -38,6 +38,8 @@ export interface PauseOptions {
   /** true = force a snapshot, false = skip, undefined = auto (change-detection). */
   snapshot?: boolean;
   workMode: 'commit' | 'stash' | 'none';
+  /** Sweep untracked files into the commit. Only ever set from an explicit yes. */
+  includeUntracked?: boolean;
   message?: string;
 }
 
@@ -124,11 +126,19 @@ export async function runPause(ctx: RunContext, opts: PauseOptions): Promise<Pau
     workMode: opts.workMode,
     message: opts.message,
     force: opts.force,
+    includeUntracked: opts.includeUntracked,
   });
   report.git = { ...push, branch: status.branch };
   if (push.committed) log.sub('committed working changes');
   if (push.stashed) log.sub('stashed working changes');
   log.sub(push.pushed ? push.detail ?? 'pushed' : push.detail ?? 'not pushed');
+  // A commit made on the user's behalf is pushed, and a push is not undoable.
+  // Say plainly which files were not carried, rather than quietly publishing them.
+  if (push.untrackedLeftBehind?.length) {
+    log.warn(`${push.untrackedLeftBehind.length} untracked file(s) were NOT committed and will not reach the other machine:`);
+    for (const f of push.untrackedLeftBehind.slice(0, 10)) log.sub(pc.dim(`  ${f}`));
+    log.hint('Add them to git yourself, gitignore them, or re-run with --include-untracked.');
+  }
   // Re-read HEAD: pushWork may have just committed, moving it.
   if (!ctx.dryRun && push.pushed) {
     const after = await active.git.status(gctx);

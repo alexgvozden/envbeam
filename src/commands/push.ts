@@ -99,6 +99,8 @@ export interface PushCliOptions extends GlobalCliOptions {
   force?: boolean;
   /** Overwrite a remote checkpoint this machine has never seen. */
   overwriteRemote?: boolean;
+  /** Sweep untracked files into the commit (they get pushed; this is one-way). */
+  includeUntracked?: boolean;
   snapshot?: boolean;
   noSnapshot?: boolean;
   commit?: boolean;
@@ -129,51 +131,81 @@ export async function pushCommand(opts: PushCliOptions): Promise<number> {
     let force = opts.force ?? false;
     let message = opts.message;
 
+    // `--include-untracked` is the only way a *non-interactive* run publishes a
+    // file git has never seen. Otherwise only somebody looking at the list can
+    // say yes to it.
+    let includeUntracked = opts.includeUntracked ?? false;
+
     // Check for uncommitted changes and prompt if needed
     if (workMode === 'none' && !force) {
-      const gitStatus = await ctx.runner.run('git', ['status', '--porcelain'], {
+      const status = await ctx.runner.run('git', ['status', '--porcelain'], {
         cwd: ctx.workspaceRoot,
         allowFailure: true,
       });
-      const dirtyFiles = gitStatus.stdout
-        .split(/\r?\n/)
-        .filter((l) => l.length > 0)
-        .map((l) => l.replace(/^.. /, ''));
+      const lines = status.stdout.split(/\r?\n/).filter((l) => l.length > 0);
+      const untracked = lines.filter((l) => l.startsWith('??')).map((l) => l.slice(3));
+      const tracked = lines.filter((l) => !l.startsWith('??')).map((l) => l.replace(/^.. /, ''));
 
-      if (dirtyFiles.length > 0) {
+      if (lines.length > 0) {
         logger.raw('');
-        logger.raw(pc.yellow(`${dirtyFiles.length} uncommitted file(s):`));
-        for (const f of dirtyFiles.slice(0, 5)) {
-          logger.raw(pc.dim(`  ${f}`));
+        if (tracked.length) {
+          logger.raw(pc.yellow(`${tracked.length} uncommitted change(s) to tracked files:`));
+          for (const f of tracked.slice(0, 5)) logger.raw(pc.dim(`  ${f}`));
+          if (tracked.length > 5) logger.raw(pc.dim(`  ... and ${tracked.length - 5} more`));
         }
-        if (dirtyFiles.length > 5) {
-          logger.raw(pc.dim(`  ... and ${dirtyFiles.length - 5} more`));
+        // Listed apart, because committing these is the irreversible one: git has
+        // never seen them, so nothing has vetted them against .gitignore.
+        if (untracked.length) {
+          logger.raw(pc.yellow(`${untracked.length} untracked file(s) git has never seen:`));
+          for (const f of untracked.slice(0, 5)) logger.raw(pc.dim(`  ${f}`));
+          if (untracked.length > 5) logger.raw(pc.dim(`  ... and ${untracked.length - 5} more`));
         }
         logger.raw('');
 
-        const choice = await prompter.select(
-          'How do you want to handle uncommitted changes?',
-          [
-            { name: 'Commit them (recommended)', value: 'commit' },
-            { name: 'Stash them', value: 'stash' },
-            { name: 'Leave them (won\'t be synced)', value: 'force' },
-            { name: 'Cancel', value: 'cancel' },
-          ],
-          'commit',
-        );
-
-        if (choice === 'cancel') {
-          logger.raw('Cancelled.');
-          return 1;
-        } else if (choice === 'commit') {
+        if (!prompter.interactive) {
+          // `--yes` means "don't ask me the routine questions", not "publish
+          // whatever is lying around". Carry the tracked work; name the rest.
           workMode = 'commit';
-          if (!message) {
-            message = await generateCommitMessage(ctx, logger, prompter);
+          message ??= 'envbeam: push checkpoint';
+        } else {
+          // With the untracked files listed right above, committing them all is
+          // informed consent, and it is what carrying your work usually means —
+          // a new source file is work too. Keep it the default, but let someone
+          // who spots a stray secret in that list commit only the tracked half.
+          const choices = untracked.length
+            ? [
+                { name: `Commit everything (${tracked.length} tracked + ${untracked.length} untracked)`, value: 'commit-all' },
+                { name: `Commit only the ${tracked.length} tracked change(s)`, value: 'commit' },
+                { name: 'Stash them', value: 'stash' },
+                { name: "Leave them (won't be synced)", value: 'force' },
+                { name: 'Cancel', value: 'cancel' },
+              ]
+            : [
+                { name: 'Commit them (recommended)', value: 'commit' },
+                { name: 'Stash them', value: 'stash' },
+                { name: "Leave them (won't be synced)", value: 'force' },
+                { name: 'Cancel', value: 'cancel' },
+              ];
+          const choice = await prompter.select(
+            'How do you want to handle uncommitted changes?',
+            choices,
+            untracked.length ? 'commit-all' : 'commit',
+          );
+
+          if (choice === 'cancel') {
+            logger.raw('Cancelled.');
+            return 1;
+          } else if (choice === 'commit' || choice === 'commit-all') {
+            workMode = 'commit';
+            includeUntracked = choice === 'commit-all';
+            if (!message) {
+              message = await generateCommitMessage(ctx, logger, prompter);
+            }
+          } else if (choice === 'stash') {
+            workMode = 'stash';
+          } else if (choice === 'force') {
+            force = true;
           }
-        } else if (choice === 'stash') {
-          workMode = 'stash';
-        } else if (choice === 'force') {
-          force = true;
         }
       }
     }
@@ -183,6 +215,7 @@ export async function pushCommand(opts: PushCliOptions): Promise<number> {
       overwriteRemote: opts.overwriteRemote,
       snapshot,
       workMode,
+      includeUntracked,
       message,
     });
 

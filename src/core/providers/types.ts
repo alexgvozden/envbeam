@@ -93,6 +93,15 @@ export interface GitPushOptions {
   workMode: 'commit' | 'stash' | 'none';
   message?: string;
   force: boolean;
+  /**
+   * Sweep untracked files into the commit (`git add -A`) rather than only
+   * tracked modifications (`git add -u`).
+   *
+   * Off unless somebody explicitly said yes. A commit made on a machine's behalf
+   * is also a *push*, so an untracked `api-key.txt` that was never gitignored
+   * lands in the remote's history and cannot be taken back.
+   */
+  includeUntracked?: boolean;
 }
 
 export interface GitPushResult {
@@ -100,6 +109,8 @@ export interface GitPushResult {
   stashed: boolean;
   pushed: boolean;
   detail?: string;
+  /** Untracked files deliberately left out of the commit. */
+  untrackedLeftBehind?: string[];
 }
 
 export interface GitProvider extends BaseProvider {

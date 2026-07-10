@@ -157,13 +157,25 @@ export class GitProviderImpl implements GitProvider {
 
     let committed = false;
     let stashed = false;
+    let untrackedLeftBehind: string[] | undefined;
 
     if (st.dirtyFiles.length > 0) {
       if (opts.workMode === 'commit') {
-        if (ctx.dryRun) {
-          ctx.logger.sub(`would commit ${st.dirtyFiles.length} file(s)`);
+        // `add -A` sweeps untracked files into a commit that is then PUSHED. An
+        // `api-key.txt` nobody remembered to gitignore ends up in the remote's
+        // history, and history is not something envbeam can take back. Stage
+        // untracked files only when the caller says so, having shown them.
+        const stage = opts.includeUntracked ? ['add', '-A'] : ['add', '-u'];
+        const tracked = st.dirtyFiles.length - st.untrackedFiles.length;
+        if (!opts.includeUntracked && st.untrackedFiles.length) {
+          untrackedLeftBehind = st.untrackedFiles;
+        }
+        if (tracked === 0 && !opts.includeUntracked) {
+          ctx.logger.sub('nothing to commit (only untracked files, which are not swept in)');
+        } else if (ctx.dryRun) {
+          ctx.logger.sub(`would commit ${opts.includeUntracked ? st.dirtyFiles.length : tracked} file(s)`);
         } else {
-          await git(ctx, ['add', '-A']);
+          await git(ctx, stage);
           await git(ctx, ['commit', '-m', opts.message ?? 'envbeam: pause checkpoint']);
           committed = true;
         }
@@ -189,12 +201,12 @@ export class GitProviderImpl implements GitProvider {
     }
 
     if (!cfg.autopush) {
-      return { committed, stashed, pushed: false, detail: 'autopush: false' };
+      return { committed, stashed, pushed: false, detail: 'autopush: false', untrackedLeftBehind };
     }
 
     if (ctx.dryRun) {
       ctx.logger.sub(`would push ${branch} to ${cfg.remote}`);
-      return { committed, stashed, pushed: false, detail: 'dry-run' };
+      return { committed, stashed, pushed: false, detail: 'dry-run', untrackedLeftBehind };
     }
 
     const pushArgs = st.hasUpstream
@@ -210,7 +222,7 @@ export class GitProviderImpl implements GitProvider {
       }
       throw new SafetyError(`git push failed: ${push.stderr.trim()}`);
     }
-    return { committed, stashed, pushed: true, detail: `pushed ${branch} → ${cfg.remote}` };
+    return { committed, stashed, pushed: true, detail: `pushed ${branch} → ${cfg.remote}`, untrackedLeftBehind };
   }
 }
 
