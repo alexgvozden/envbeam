@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { PostgresProvider } from '../../src/core/providers/database/postgres.js';
+import { PostgresProvider, plainFormatTables, customFormatTables, isPlainTableIdent } from '../../src/core/providers/database/postgres.js';
 import { MysqlProvider } from '../../src/core/providers/database/mysql.js';
 import { resolveConnection, parseDbUrl } from '../../src/core/providers/database/connection.js';
 import { runMigrateCommand } from '../../src/core/providers/database/migrate.js';
@@ -250,3 +250,57 @@ describe('findDatabaseUrls / ambiguity', () => {
     expect(ambiguousUrlWarning(env, 'mysql', 'MYSQL_URL')).toBeNull();
   });
 })
+
+// Found by the end-to-end run: `psql -f` prints each error, keeps going, and
+// exits 0 — so a data-only restore that collided on every primary key reported
+// success, applied nothing, and let envbeam advance its sync base over a
+// database it had never written. Restoring a snapshot has to leave the tables
+// holding what the snapshot holds.
+describe('postgres restore replaces data rather than appending to it', () => {
+  it('reads the target tables off a plain-SQL dump', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const f = path.join(dir, 'dump.sql');
+    await fs.writeFile(
+      f,
+      [
+        '-- pg_dump output',
+        'COPY public.notes (id, body) FROM stdin;',
+        '1\thello',
+        '\\.',
+        'COPY public.tags (id) FROM stdin;',
+        '\\.',
+        'INSERT INTO public.audit (id) VALUES (1);',
+      ].join('\n'),
+    );
+    expect((await plainFormatTables(f)).sort()).toEqual(['public.audit', 'public.notes', 'public.tags']);
+  });
+
+  it('returns nothing for a missing or empty dump', async () => {
+    expect(await plainFormatTables('/nonexistent/dump.sql')).toEqual([]);
+  });
+
+  it('reads the target tables off a custom-format dump via pg_restore -l', async () => {
+    const runner = new FakeRunner({ available: ['pg_restore'] });
+    runner.on('pg_restore', {
+      stdout: [
+        ';',
+        '; Archive created at 2026-07-10',
+        ';',
+        '215; 0 16385 TABLE DATA public notes app',
+        '216; 0 16390 TABLE DATA public tags app',
+        '2003; 2606 16400 CONSTRAINT public notes notes_pkey app',
+      ].join('\n'),
+    });
+    const ctx = makeTestContext({ config: { version: 1, workspace: 'w' }, runner }).providerCtx('database');
+    expect((await customFormatTables(ctx, '/tmp/x.dump')).sort()).toEqual(['public.notes', 'public.tags']);
+  });
+
+  it('refuses to interpolate a table name that would need quoting', () => {
+    expect(isPlainTableIdent('public.notes')).toBe(true);
+    expect(isPlainTableIdent('notes')).toBe(true);
+    expect(isPlainTableIdent('public.notes; DROP TABLE x')).toBe(false);
+    expect(isPlainTableIdent('"Mixed Case"')).toBe(false);
+    expect(isPlainTableIdent("public.n'x")).toBe(false);
+  });
+});

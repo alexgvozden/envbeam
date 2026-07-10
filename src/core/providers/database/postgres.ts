@@ -117,6 +117,14 @@ export class PostgresProvider extends SqlDatabaseProvider {
   protected async restoreFromFile(ctx: ProviderContext, file: string): Promise<void> {
     const c = conn(ctx);
     const isCustom = await isPgCustomFormat(file);
+
+    // A data-only dump carries rows, not a schema, so applying it to a table
+    // that already has rows APPENDS — and where the dump's primary keys collide
+    // with existing ones it fails outright. "Restore this snapshot" has to mean
+    // the tables end up holding what the snapshot holds, so empty them first.
+    const tables = isCustom ? await customFormatTables(ctx, file) : await plainFormatTables(file);
+    if (tables.length) await truncateTables(ctx, tables);
+
     if (isCustom) {
       // pg_restore requires an explicit -d target to load into a database.
       const target = c.parts.url ?? c.parts.database;
@@ -125,11 +133,14 @@ export class PostgresProvider extends SqlDatabaseProvider {
       }
       await ctx.runner.run(
         'pg_restore',
-        ['--no-owner', '--no-privileges', '--data-only', '-d', target, file],
+        ['--no-owner', '--no-privileges', '--data-only', '--exit-on-error', '-d', target, file],
         { env: c.env },
       );
     } else {
-      await ctx.runner.run('psql', [...c.args, '-f', file], { env: c.env });
+      // Without ON_ERROR_STOP, psql prints each error, keeps going, and exits 0.
+      // A restore that applied nothing then reported success, and envbeam
+      // advanced its sync base over a database it had never actually written.
+      await ctx.runner.run('psql', [...c.args, '-v', 'ON_ERROR_STOP=1', '-f', file], { env: c.env });
     }
   }
 
@@ -149,6 +160,64 @@ function quoteIdent(table: string): string {
     .split('.')
     .map((p) => `"${p.replace(/"/g, '""')}"`)
     .join('.');
+}
+
+/**
+ * A schema-qualified table identifier we are willing to interpolate into SQL.
+ * `pg_dump` emits plain `schema.table`; anything needing quotes (a name with a
+ * dot, a space, mixed case) is rejected rather than escaped, and the table is
+ * left alone. Refusing to truncate is always safe; guessing at quoting is not.
+ */
+export function isPlainTableIdent(name: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(name);
+}
+
+/** Tables a plain-SQL data dump loads into, read off its `COPY` statements. */
+export async function plainFormatTables(file: string): Promise<string[]> {
+  let text: string;
+  try {
+    text = await fs.readFile(file, 'utf8');
+  } catch {
+    return [];
+  }
+  const out = new Set<string>();
+  for (const m of text.matchAll(/^COPY\s+([^\s(]+)\s*\(/gm)) out.add(m[1]!);
+  for (const m of text.matchAll(/^INSERT\s+INTO\s+([^\s(]+)\s*[(\s]/gim)) out.add(m[1]!);
+  return [...out].filter(isPlainTableIdent);
+}
+
+/** Tables a custom-format dump loads into, via `pg_restore -l`. */
+export async function customFormatTables(ctx: ProviderContext, file: string): Promise<string[]> {
+  const res = await ctx.runner.run('pg_restore', ['-l', file], { allowFailure: true });
+  if (res.code !== 0) return [];
+  const out = new Set<string>();
+  // Lines look like: `123; 0 16385 TABLE DATA public notes app`
+  for (const line of res.stdout.split(/\r?\n/)) {
+    const m = line.match(/\bTABLE DATA\s+(\S+)\s+(\S+)/);
+    if (m) out.add(`${m[1]}.${m[2]}`);
+  }
+  return [...out].filter(isPlainTableIdent);
+}
+
+/**
+ * Empty the given tables, ignoring any that don't exist yet (a fresh clone
+ * restores before its migrations have ever run on some tables). `to_regclass`
+ * makes the existence check cheap and injection-safe; the names themselves are
+ * validated by {@link isPlainTableIdent} before they reach here.
+ */
+async function truncateTables(ctx: ProviderContext, tables: string[]): Promise<void> {
+  const c = conn(ctx);
+  const list = tables.map((t) => `'${t}'`).join(',');
+  const sql = `DO $$
+DECLARE t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY[${list}]::text[] LOOP
+    IF to_regclass(t) IS NOT NULL THEN
+      EXECUTE 'TRUNCATE TABLE ' || t || ' RESTART IDENTITY CASCADE';
+    END IF;
+  END LOOP;
+END $$;`;
+  await ctx.runner.run('psql', [...c.args, '-v', 'ON_ERROR_STOP=1', '-c', sql], { env: c.env });
 }
 
 /** Postgres custom-format dumps start with the magic header "PGDMP". */

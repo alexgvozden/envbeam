@@ -189,4 +189,60 @@ describe(`postgres provider (real docker ${PG_IMAGE})`, () => {
       await cleanup();
     }
   }, 60_000);
+
+  /**
+   * The round-trip above truncates before restoring, which is why it never
+   * caught this: restoring onto a table that still holds rows is the actual
+   * cross-machine case. A data-only dump appends, and its primary keys collide
+   * with the ones already there. `psql -f` printed every error, kept going, and
+   * exited 0 — so envbeam reported "restored snapshot" over a database it had
+   * not written, and advanced its sync base.
+   */
+  for (const compress of [true, false]) {
+    it(`restore over conflicting rows replaces them (${compress ? 'custom' : 'plain'} format)`, async () => {
+      if (!dockerOk || !pgDumpOk) return;
+      const { dir, cleanup } = await tmpDir();
+      try {
+        const provider = new PostgresProvider();
+        const ctx = pgCtx(dir);
+
+        await psql('DROP TABLE IF EXISTS seed_users');
+        await psql('CREATE TABLE seed_users(id serial primary key, name text)');
+        await psql("INSERT INTO seed_users(name) VALUES ('alice'),('bob')");
+
+        const snap = await provider.snapshot(ctx, { ...SNAP, compress });
+        expect(snap.sizeBytes).toBeGreaterThan(0);
+
+        // The other machine's database: same ids, different rows, plus one more.
+        await psql('TRUNCATE seed_users RESTART IDENTITY');
+        await psql("INSERT INTO seed_users(name) VALUES ('zed'),('yan'),('xor')");
+        expect(await psql('SELECT count(*) FROM seed_users')).toBe('3');
+
+        const res = await provider.restore(ctx, snap.file);
+        expect(res.restored).toBe(true);
+
+        // The table now holds exactly what the snapshot held — not 5 rows, not 3
+        // stale ones, and the restore did not quietly do nothing.
+        expect(await psql('SELECT count(*) FROM seed_users')).toBe('2');
+        expect(await psql("SELECT string_agg(name, ',' ORDER BY id) FROM seed_users")).toBe('alice,bob');
+      } finally {
+        await cleanup();
+      }
+    }, 60_000);
+  }
+
+  it('a restore that genuinely fails is reported as a failure, not a success', async () => {
+    if (!dockerOk || !pgDumpOk) return;
+    const { dir, cleanup } = await tmpDir();
+    try {
+      const provider = new PostgresProvider();
+      const ctx = pgCtx(dir);
+      const bad = path.join(dir, 'bad.sql');
+      await fs.writeFile(bad, 'COPY public.no_such_table (id) FROM stdin;\n1\n\\.\n');
+      // Without ON_ERROR_STOP this resolved successfully.
+      await expect(provider.restore(ctx, bad)).rejects.toThrow();
+    } finally {
+      await cleanup();
+    }
+  }, 60_000);
 });

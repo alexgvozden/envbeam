@@ -448,7 +448,17 @@ async function pauseDatabase(
     const ok = await recordArtifactHash(dctx.runner, ctx.config.workspace, uploadName, await sha256File(uploadFile), live);
     if (!ok) log.warn('could not record snapshot integrity hash in Doppler — restore cannot verify this snapshot');
 
-    await patchState(ctx.workspaceRoot, { lastSnapshotTimestamp: timestamp, baseSnapshotName: entry.name });
+    // Re-baseline change detection against the data we just published. The
+    // change-detection path records a fingerprint, but `--snapshot` skips that
+    // path entirely — so a forced snapshot left `dbFingerprint` unset, and the
+    // next pull's divergence check (D4) had nothing to compare against and
+    // silently allowed a restore over locally-changed data.
+    const fingerprint = (await active.database.hasChanged(dctx, undefined)).fingerprint;
+    await patchState(ctx.workspaceRoot, {
+      lastSnapshotTimestamp: timestamp,
+      baseSnapshotName: entry.name,
+      ...(fingerprint ? { dbFingerprint: fingerprint } : {}),
+    });
     out.snapshot = { timestamp, file: entry.name, sizeBytes: result.sizeBytes };
     log.sub(`snapshot pushed → ${entry.name} (${sizeMB.toFixed(1)}MB)`);
     return out;

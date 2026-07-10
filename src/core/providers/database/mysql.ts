@@ -153,6 +153,11 @@ export class MysqlProvider extends SqlDatabaseProvider {
       sqlFile = temp;
     }
     try {
+      // Unlike `psql -f`, the mysql client aborts batch input at the first error
+      // and exits non-zero, so a failed restore surfaces rather than being
+      // reported as a success. It does NOT empty the tables first, though, so a
+      // data-only dump applied over existing rows appends (and collides on the
+      // primary key). The postgres provider truncates; this one should too.
       await ctx.runner.run(
         'mysql',
         [...c.args, c.database, '-e', `source ${sqlFile}`],

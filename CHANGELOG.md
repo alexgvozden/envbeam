@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - 2026-07-10
+
+More findings from the two-machine end-to-end run. The worst one: **`pull` reported restoring a snapshot it had not restored.**
+
+### Fixed
+- **A Postgres restore that failed was reported as a success.** `restoreFromFile` ran `psql -f <dump>` without `-v ON_ERROR_STOP=1`. psql's default is to print each error, carry on, and **exit 0**. A data-only dump applied to a table that already holds rows collides on every primary key, so nothing was written — and envbeam printed `restored snapshot from …`, recorded it as the new `lastRestoredTimestamp`, and advanced `baseRevision`. The machine then believed it held the remote's data while holding its own. `psql` now runs with `ON_ERROR_STOP=1` and `pg_restore` with `--exit-on-error`.
+- **A data-only restore now replaces the data instead of appending to it.** "Restore this snapshot" has to mean the tables end up holding what the snapshot holds. The tables the dump loads into are read from its `COPY`/`INSERT` statements (plain format) or from `pg_restore -l` (custom format), and truncated first — skipping any that don't exist yet, so a fresh clone still restores before every migration has run. Table names that would need quoting are refused rather than escaped: not truncating is always safe, guessing at quoting is not.
+- **`push --snapshot` now records the change-detection fingerprint.** Forcing a snapshot skips the change-detection branch, which is the only place `dbFingerprint` was written — so after a forced push the D4 divergence guard had no baseline, and the next `pull` would happily restore over locally-changed data. It is now re-baselined against the data actually published, on every snapshot.
+
+### Changed
+- The Postgres integration suite gained a restore-over-conflicting-rows case (both dump formats) and a restore-must-fail case. The existing round-trip truncated the table before restoring, which is precisely why it never caught any of this.
+- Noted in `mysql.ts` that its client *does* abort on error (so it fails loudly rather than silently), but that it does not truncate before a data-only restore either.
+
 ## [0.23.2] - 2026-07-10
 
 Two bugs found by running the whole thing end to end on two machines against a real remote, a real Hetzner bucket, and real Doppler — neither of which any unit test could have surfaced.
