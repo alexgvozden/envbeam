@@ -6,7 +6,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Command } from 'commander';
 import pc from 'picocolors';
-import { setCommandTrace } from './core/util/exec.js';
+import { setCommandTrace, RealCommandRunner } from './core/util/exec.js';
+import { runUpdateCheck } from './core/util/updateCheck.js';
+import { isInteractive } from './core/providers/secretsAuth.js';
+import { makeLogger, makePrompter } from './commands/shared.js';
 import { initCommand } from './commands/init.js';
 import { pullCommand } from './commands/pull.js';
 import { pushCommand } from './commands/push.js';
@@ -50,6 +53,8 @@ try {
 
 /** True when executing compiled output (dist/), not tsx over src/. */
 const IS_COMPILED = fileURLToPath(import.meta.url).includes(`${path.sep}dist${path.sep}`);
+/** Real directory of the running package — anchors install-method detection. */
+const PKG_ROOT = path.dirname(require.resolve('../package.json'));
 /** The script the shell actually resolved — pinpoints WHICH install is running. */
 const CLI_PATH = process.argv[1] ?? fileURLToPath(import.meta.url);
 /** Version + build stamp; a stale dist can't masquerade as a fresh version. */
@@ -102,7 +107,7 @@ function ensureFreshBuild(): void {
     }
     console.error(pc.red('  rebuild failed — reinstall instead:'));
   }
-  console.error(pc.dim('  npm i -g "git+ssh://git@github.com/alexgvozden/envbeam.git#main"'));
+  console.error(pc.dim('  npm i -g envbeam@latest'));
 }
 
 function globalOpts(cmd: Command): GlobalCliOptions {
@@ -137,7 +142,31 @@ async function main(): Promise<void> {
     .option('-y, --yes', 'assume yes / accept defaults (non-interactive)')
     .option('-v, --verbose', 'verbose output')
     .option('-q, --quiet', 'only errors')
+    .option('--no-update-check', 'skip the check for a newer envbeam version')
     .showHelpAfterError();
+
+  // Single choke point for the update check: commander runs this before EVERY
+  // command's action, and exactly one leaf action fires per invocation. `-V`/`-h`
+  // resolve without an action, so they never reach this — the check is naturally
+  // skipped for version/help. It must never throw (runUpdateCheck swallows all
+  // errors) and never block (hard registry timeout + 24h cache).
+  program.hook('preAction', async (thisCommand) => {
+    const g = thisCommand.optsWithGlobals() as GlobalCliOptions & { updateCheck?: boolean };
+    if (g.updateCheck === false) return; // --no-update-check
+    if (['1', 'true'].includes(process.env.ENVBEAM_NO_UPDATE_CHECK ?? '')) return;
+    await runUpdateCheck({
+      currentVersion: VERSION,
+      packageRoot: PKG_ROOT,
+      isCompiled: IS_COMPILED,
+      runner: new RealCommandRunner(),
+      logger: makeLogger(g),
+      prompter: makePrompter(g),
+      interactive: isInteractive(),
+      assumeYes: Boolean(g.yes),
+      dryRun: Boolean(g.dryRun),
+      argv: process.argv,
+    });
+  });
 
   program
     .command('init [project]')

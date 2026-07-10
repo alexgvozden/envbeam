@@ -44,7 +44,15 @@ async function eb(cwd: string, home: string, ...args: string[]) {
     allowFailure: true,
     // ENVBEAM_DISABLE_STORAGE keeps the compiled CLI from reaching the real
     // Doppler/S3 registry (the subprocess inherits process.env otherwise).
-    env: { ENVBEAM_HOME: home, ENVBEAM_CREDENTIAL_STORE: 'file', NO_COLOR: '1', ENVBEAM_DISABLE_STORAGE: '1' },
+    // ENVBEAM_NO_UPDATE_CHECK keeps the pre-action update check from reaching the
+    // real npm registry (and keeps these runs deterministic / network-free).
+    env: {
+      ENVBEAM_HOME: home,
+      ENVBEAM_CREDENTIAL_STORE: 'file',
+      NO_COLOR: '1',
+      ENVBEAM_DISABLE_STORAGE: '1',
+      ENVBEAM_NO_UPDATE_CHECK: '1',
+    },
   });
   return { code: res.code, out: strip(res.stdout), err: strip(res.stderr) };
 }

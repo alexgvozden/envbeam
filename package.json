@@ -1,6 +1,6 @@
 {
   "name": "envbeam",
-  "version": "0.16.0",
+  "version": "0.18.1",
   "description": "Pause your work on one machine, resume it whole on another: code, secrets, container, database, and Claude session — under the right account for each.",
   "type": "module",
   "bin": {
@@ -47,6 +47,14 @@
   ],
   "author": "Alex Gvozden",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexgvozden/envbeam.git"
+  },
+  "homepage": "https://github.com/alexgvozden/envbeam#readme",
+  "bugs": {
+    "url": "https://github.com/alexgvozden/envbeam/issues"
+  },
   "dependencies": {
     "@inquirer/prompts": "^7.2.1",
     "commander": "^13.0.0",

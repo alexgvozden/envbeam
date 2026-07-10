@@ -70,13 +70,15 @@ Each concern runs under **the right account** for it (work GitHub, personal Dopp
 
 ## Install
 
-Not on the public npm registry yet — install straight from git:
-
 ```bash
-npm install -g "git+ssh://git@github.com/alexgvozden/envbeam.git#main"
+npm install -g envbeam
 ```
 
+Install it **globally** — `envbeam` is a CLI you run from any project directory, not a library to depend on.
+
 Requires **Node ≥ 18**. Missing a provider CLI (`docker`, `doppler`, `pg_dump`, …)? `envbeam` **installs it for you** on demand — or run `envbeam doctor` to see the full picture first.
+
+envbeam checks for a newer release before it runs and offers to upgrade itself. Skip that with `--no-update-check` or `ENVBEAM_NO_UPDATE_CHECK=1`; upgrade by hand any time with `npm install -g envbeam@latest`.
 
 ---
 

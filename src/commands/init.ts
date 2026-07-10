@@ -13,6 +13,7 @@ import { checkSecretsAuth, loginHint, isInteractive } from '../core/providers/se
 import { pullCommand } from './pull.js';
 import { ensureStorageReady } from './storage.js';
 import { getMachineId } from '../core/util/machine.js';
+import { inspectLocalGit, sameRemote } from '../core/util/gitSync.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
 
 /**
@@ -90,23 +91,41 @@ export async function initCommand(opts: InitOptions): Promise<number> {
   const prompter = makePrompter(opts);
   const runner = opts.runner ?? new RealCommandRunner();
 
-  // `envbeam init <name>` for a project that already exists remotely →
-  // reuse the pull bootstrap (clone, write config from snapshot, sync).
+  // `envbeam init <name>` for a project that already exists remotely can be
+  // bootstrapped via pull (clone, write config from snapshot, sync) — but that
+  // runs a full resume, so never do it implicitly. Ask; on "no", scaffold a
+  // local config here, which is what `init` says on the tin.
   if (opts.project) {
     if (await isStorageConfigured()) {
       const existing = await createRegistryStore(runner)
         .then((store) => store.getProject(opts.project!))
         .catch(() => undefined);
       if (existing) {
-        logger.info(`Project "${opts.project}" exists remotely — bootstrapping via pull…`);
-        return pullCommand({
-          dryRun: opts.dryRun,
-          yes: opts.yes,
-          verbose: opts.verbose,
-          quiet: opts.quiet,
-          project: opts.project,
-          dir: opts.dir,
-        });
+        logger.warn(`Project "${opts.project}" already exists in the registry.`);
+        if (existing.gitRemote) logger.sub(pc.dim(`remote: ${existing.gitRemote}`));
+        if (existing.lastPush) logger.sub(pc.dim(`last push: ${existing.lastPush}`));
+        logger.hint('Pulling runs a full resume: it fast-forwards git, overwrites .env, and may start containers.');
+
+        const doPull = await prompter.confirm(`Pull "${opts.project}" from the registry?`, false);
+        if (doPull) {
+          // Standing inside the project's own checkout, `pull <name>` would
+          // clone a nested copy at ./<name>. Target this directory instead.
+          const here = await inspectLocalGit(runner, process.cwd());
+          const dir =
+            opts.dir ?? (sameRemote(here.remoteUrl, existing.gitRemote) ? process.cwd() : undefined);
+          return pullCommand({
+            dryRun: opts.dryRun,
+            yes: opts.yes,
+            verbose: opts.verbose,
+            quiet: opts.quiet,
+            project: opts.project,
+            dir,
+            runner,
+          });
+        }
+
+        logger.info(`Not pulling — writing a local ${WORKSPACE_CONFIG_NAME} instead.`);
+        logger.hint(`Run \`envbeam pull ${opts.project}\` when you want to sync from the registry.`);
       }
     }
     // Not registered yet: fall through and scaffold a new project with this name.

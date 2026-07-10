@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] - 2026-07-10
+
+### Changed
+- **Published to the public npm registry** — install with `npm install -g envbeam` instead of a `git+ssh` URL. README's install section and the stale-build reinstall hint printed by `cli.ts` both now point at npm, which is also the channel the 0.18.0 update check reads.
+- Added `LICENSE` (MIT was declared in `package.json` but the file was missing) and `repository`/`homepage`/`bugs` metadata so the npm page links back to the source.
+
+### Fixed
+- **Regenerated `schema/envbeam.schema.json`**, which had drifted from `src/core/config/schema.ts` — it was missing the `claude-native` session provider and carried a stale `session.provider` default. The schema ships in the published tarball, so 0.18.0 shipped the stale copy.
+
+## [0.18.0] - 2026-07-09
+
+### Added
+- **Update check + self-upgrade before every command** — envbeam now checks the npm registry for a newer release before a command runs (`src/core/util/updateCheck.ts`, wired as a commander `preAction` hook in `src/cli.ts`). When a newer version exists on an interactive **global npm** install, it asks and, on yes, runs `npm install -g envbeam@latest` **for you** and re-execs your original command against the new code — never dead-ending with "run X yourself". The check is bounded (2s registry timeout via `AbortController`; any failure silently continues on the current version) and throttled (result cached in `stateDir()/update-check.json`, at most one registry hit per 24h — and a *failed* read is cached for an hour, so an offline machine doesn't pay the timeout on every command). A declined version is snoozed so it won't nag again the same day.
+  - **Safe by context:** never prompts or mutates in non-interactive/CI, under `--yes`, or under `--dry-run` — it prints a one-line stderr notice and continues (auto-upgrading mid-pipeline under `--yes` would be surprising). `-V`/`-h` skip the check entirely (no action fires). Disable with `--no-update-check` or `ENVBEAM_NO_UPDATE_CHECK=1`.
+  - **Install-method aware:** only a global npm install is auto-upgraded. A git/source checkout (self-heals via the build stamp instead), an `npx` cache, or a project-local `node_modules` dependency is detected and left untouched with an explanation.
+  - `compareSemver` gives real semver precedence (`0.9.0 < 0.10.0`, `0.18.0-beta.1 < 0.18.0`) rather than string comparison.
+
+## [0.17.0] - 2026-07-09
+
+### Changed
+- **`init <name>` no longer pulls implicitly** — when the name already exists in the registry, `init` used to silently delegate to the pull bootstrap, which clones and runs a full resume (fast-forwards git, overwrites `.env`, may start containers and apply migrations). It now reports the existing entry (remote, last push), states what a pull would do, and **asks**. Declining scaffolds a local `.envbeam.yaml`, which is what `init` implies. `--yes` still consents to the pull.
+- **`init <name>` run inside the project's own checkout no longer nests a clone** — the pull bootstrap targets `./<name>`, so confirming a pull from inside `synthetic-signals/` used to clone a second copy at `synthetic-signals/synthetic-signals`. When the current directory is already a checkout of the project's remote, it is used as the target.
+
+### Added
+- **Divergence check before pulling into an existing checkout** — `pull <name>` now fetches and reports the local branch's state against its upstream (commits ahead/behind, the ahead commits themselves, uncommitted files) before running resume. If the checkout holds work the remote hasn't seen, or the branch has no upstream, it requires confirmation and exits non-zero when declined. Clean, in-sync checkouts proceed unprompted.
+- `inspectLocalGit` / `hasUnsyncedWork` / `sameRemote` helpers in `core/util/gitSync.ts`.
+
+### Fixed
+- **`pull <name>` into a config-less checkout of the right repo no longer dead-ends** — instead of erroring with "Remove the directory", it restores `.envbeam.yaml` from the registry snapshot when the directory is a checkout of the project's own remote.
+
 ## [0.16.0] - 2026-07-08
 
 ### Security

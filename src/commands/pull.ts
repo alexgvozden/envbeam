@@ -9,6 +9,10 @@ import { EnvbeamError } from '../core/util/errors.js';
 import { createRegistryStore, checkProjectRegistration } from '../core/registry/index.js';
 import { ensureStorageReady } from './storage.js';
 import { WORKSPACE_CONFIG_NAME } from '../core/config/paths.js';
+import { inspectLocalGit, hasUnsyncedWork, sameRemote } from '../core/util/gitSync.js';
+import type { CommandRunner } from '../core/util/exec.js';
+import type { Logger } from '../core/util/logger.js';
+import type { Prompter } from '../core/util/prompt.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
 
 export interface PullCliOptions extends GlobalCliOptions {
@@ -16,6 +20,54 @@ export interface PullCliOptions extends GlobalCliOptions {
   project?: string;
   /** Directory to clone into (bootstrap mode). */
   dir?: string;
+  /** Injectable command runner (tests pass a fake to avoid real network I/O). */
+  runner?: CommandRunner;
+}
+
+/**
+ * A pull into an existing checkout runs resume, which materializes secrets over
+ * `.env` and may start containers and apply migrations. Git commits are never
+ * at risk (resume fast-forwards only, and skips a dirty tree), but local work
+ * the remote hasn't seen means the caller may not have meant to pull here at
+ * all. Show what is unsynced and make them say yes.
+ *
+ * Returns true when the pull should proceed.
+ */
+async function confirmPullOverLocalWork(
+  deps: { runner: CommandRunner; logger: Logger; prompter: Prompter },
+  dir: string,
+): Promise<boolean> {
+  const { logger, prompter } = deps;
+  const state = await inspectLocalGit(deps.runner, dir);
+
+  if (!state.isRepo) return true;
+
+  if (!state.hasUpstream) {
+    logger.warn(`Branch "${state.branch}" has no upstream — nothing has been pushed to a remote.`);
+  } else if (state.ahead > 0 && state.behind > 0) {
+    logger.warn(
+      `Local branch "${state.branch}" has diverged: ${state.ahead} commit(s) ahead, ${state.behind} behind.`,
+    );
+  } else if (state.ahead > 0) {
+    logger.warn(`Local branch "${state.branch}" is ${state.ahead} commit(s) ahead of its upstream.`);
+  } else if (state.behind > 0) {
+    logger.sub(pc.dim(`${state.behind} commit(s) to fast-forward.`));
+  }
+
+  for (const line of state.aheadCommits) logger.sub(pc.dim(`  ${line}`));
+  if (state.ahead > state.aheadCommits.length) {
+    logger.sub(pc.dim(`  …and ${state.ahead - state.aheadCommits.length} more`));
+  }
+
+  if (state.dirtyFiles.length) {
+    logger.warn(`${state.dirtyFiles.length} uncommitted file(s) in the working tree.`);
+    for (const f of state.dirtyFiles.slice(0, 10)) logger.sub(pc.dim(`  ${f}`));
+  }
+
+  if (!hasUnsyncedWork(state) && state.hasUpstream) return true;
+
+  logger.hint('Pull will not touch your commits (fast-forward only), but it overwrites .env from the secrets provider.');
+  return prompter.confirm('Continue with pull?', false);
 }
 
 /**
@@ -73,7 +125,7 @@ export async function pullCommand(opts: PullCliOptions): Promise<number> {
 async function bootstrapPullCommand(projectName: string, opts: PullCliOptions): Promise<number> {
   const logger = makeLogger(opts);
   const prompter = makePrompter(opts);
-  const runner = new RealCommandRunner();
+  const runner = opts.runner ?? new RealCommandRunner();
 
   return runCommand(logger, async () => {
     // Self-heal storage (install/auth Doppler, import S3 config) before pulling.
@@ -106,31 +158,50 @@ async function bootstrapPullCommand(projectName: string, opts: PullCliOptions): 
     // Check if directory exists
     if (await pathExists(targetDir)) {
       const configPath = path.join(targetDir, WORKSPACE_CONFIG_NAME);
-      if (await pathExists(configPath)) {
-        // Directory exists with config - just cd there and run normal resume
-        logger.info(`Project already exists at ${targetDir}`);
-        logger.info('Running pull…');
+      let hasConfig = await pathExists(configPath);
 
-        // Change to project directory
-        const originalCwd = process.cwd();
-        process.chdir(targetDir);
-
-        try {
-          const ctx = await buildRunContext({
-            dryRun: opts.dryRun,
-            logger,
-            prompter,
-          });
-          await runResume(ctx);
-          return 0;
-        } finally {
-          process.chdir(originalCwd);
+      if (!hasConfig) {
+        // No config, but if this is already a checkout of the project's own
+        // remote then the config is simply missing — restore it from the
+        // registry snapshot rather than telling the user to delete their work.
+        const local = await inspectLocalGit(runner, targetDir);
+        if (local.isRepo && sameRemote(local.remoteUrl, project.gitRemote) && project.configSnapshot) {
+          logger.info(`Restoring ${WORKSPACE_CONFIG_NAME} from registry snapshot…`);
+          await fs.writeFile(configPath, project.configSnapshot);
+          hasConfig = true;
+        } else {
+          throw new EnvbeamError(
+            `Directory "${targetDir}" exists but has no ${WORKSPACE_CONFIG_NAME}.`,
+            { exitCode: 1, hint: 'Remove the directory or specify a different --dir.' },
+          );
         }
-      } else {
-        throw new EnvbeamError(
-          `Directory "${targetDir}" exists but has no ${WORKSPACE_CONFIG_NAME}.`,
-          { exitCode: 1, hint: 'Remove the directory or specify a different --dir.' },
-        );
+      }
+
+      // Directory exists with config - just cd there and run normal resume
+      logger.info(`Project already exists at ${targetDir}`);
+
+      if (!(await confirmPullOverLocalWork({ runner, logger, prompter }, targetDir))) {
+        logger.info('Pull cancelled — nothing was changed.');
+        logger.hint('Push your local commits first, or re-run with --yes to pull anyway.');
+        return 1;
+      }
+
+      logger.info('Running pull…');
+
+      // Change to project directory
+      const originalCwd = process.cwd();
+      process.chdir(targetDir);
+
+      try {
+        const ctx = await buildRunContext({
+          dryRun: opts.dryRun,
+          logger,
+          prompter,
+        });
+        await runResume(ctx);
+        return 0;
+      } finally {
+        process.chdir(originalCwd);
       }
     }
 

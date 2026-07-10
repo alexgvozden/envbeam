@@ -305,22 +305,95 @@
             "provider": {
               "type": "string",
               "enum": [
+                "claude-native",
                 "claude-sync",
                 "remote-control",
                 "none"
               ],
-              "default": "claude-sync"
+              "default": "none",
+              "description": "Session sync provider: claude-native (built-in), claude-sync (external CLI), or none."
             },
             "scope": {
               "type": "string",
               "enum": [
-                "sessions",
-                "full"
+                "project",
+                "workspace",
+                "global"
               ],
-              "default": "sessions"
+              "default": "project",
+              "description": "project: ~/.claude/projects/<path>/ sessions only; workspace: .claude/ folder in repo; global: ~/.claude/ (tools, plugins, settings)."
             },
-            "remotePath": {
-              "type": "string"
+            "sync": {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "type": "string",
+                  "enum": [
+                    "syncthing",
+                    "s3",
+                    "local-folder"
+                  ],
+                  "description": "Where DB snapshots live."
+                },
+                "identity": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9.+-]*:[a-z0-9][a-z0-9._-]*$",
+                  "description": "Reference to a named identity defined in global config (~/.envbeam/config.yaml)."
+                },
+                "path": {
+                  "type": "string",
+                  "description": "Folder path for syncthing/local-folder targets."
+                },
+                "bucket": {
+                  "type": "string",
+                  "description": "S3 bucket name (s3 target)."
+                },
+                "prefix": {
+                  "type": "string",
+                  "description": "Key prefix within the bucket/folder."
+                },
+                "region": {
+                  "type": "string",
+                  "description": "S3 region (s3 target)."
+                },
+                "encrypt": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "age",
+                    "gpg"
+                  ],
+                  "default": "none",
+                  "description": "At-rest encryption of snapshot files."
+                },
+                "recipient": {
+                  "type": "string",
+                  "description": "age/gpg recipient (public key / key id)."
+                },
+                "maxSizeMB": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "default": 500,
+                  "description": "Warn/abort above this dump size."
+                },
+                "keep": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 5,
+                  "description": "Retain N most recent snapshots."
+                }
+              },
+              "required": [
+                "target"
+              ],
+              "additionalProperties": false
+            },
+            "remotePaths": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Machine name → project path mapping for session path translation, e.g. {\"laptop\": \"/home/user/project\"}."
             }
           },
           "additionalProperties": false
