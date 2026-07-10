@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.2] - 2026-07-10
+
+### Fixed
+- **A hand-edited `.env` no longer blocks a pull under `sync: pull-only`.** The sync guard counted any edit to the materialized dotenv as local divergence, so a scratch value in `.env` made `pull` refuse with *"this machine and the remote have BOTH changed"*. Under `pull-only` — the default — the provider is the source of truth and `.env` is a generated artifact: an edit to it conflicts with nothing on the remote. That case is handled where it belongs, by the backup-and-confirm in `materializeSecrets` (S2). Under `sync: two-way`, where `.env` is where local secret edits actually live and a push uploads them, an edit is still divergence.
+
 ## [0.24.1] - 2026-07-10
 
 ### Fixed

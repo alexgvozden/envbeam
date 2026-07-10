@@ -64,8 +64,20 @@ async function readRemote(ctx: RunContext): Promise<{ entry?: ProjectEntry; unav
   }
 }
 
-/** Has the materialized dotenv been edited since envbeam wrote it? */
+/**
+ * Has the materialized dotenv been edited since envbeam wrote it, in a way that
+ * means this machine's *shared* state has moved?
+ *
+ * Only under `sync: two-way`. There, `.env` is where local secret edits live and
+ * a push uploads them, so an edit is genuinely a change the remote hasn't seen.
+ * Under `pull-only` — the default — the provider is the source of truth and the
+ * file is a generated artifact: an edit to it conflicts with nothing on the
+ * remote, and counting it as divergence would block every pull over a scratch
+ * value. That case is handled where it belongs, by the backup-and-confirm in
+ * `materializeSecrets` (SYNC_SAFETY.md S2).
+ */
 async function dotenvEdited(ctx: RunContext): Promise<boolean> {
+  if ((ctx.config.secrets?.sync ?? 'pull-only') !== 'two-way') return false;
   const state = await loadState(ctx.workspaceRoot);
   if (!state.dotenvHash) return false; // no base recorded — cannot tell, don't guess
   const rel =

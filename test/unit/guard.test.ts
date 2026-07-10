@@ -93,12 +93,20 @@ function runnerWith(opts: {
 
 async function ctxOn(
   runner: FakeRunner,
-  opts: { force?: boolean; dryRun?: boolean; prompter?: AutoPrompter; lines?: string[] } = {},
+  opts: {
+    force?: boolean;
+    dryRun?: boolean;
+    prompter?: AutoPrompter;
+    lines?: string[];
+    secretsSync?: 'pull-only' | 'two-way';
+  } = {},
 ): Promise<{ ctx: RunContext; root: string }> {
   const { dir, cleanup } = await tmpDir();
   cleanups.push(cleanup);
   const ctx = makeTestContext({
-    config,
+    config: opts.secretsSync
+      ? { ...config, secrets: { ...config.secrets, sync: opts.secretsSync } }
+      : config,
     runner,
     workspaceRoot: dir,
     force: opts.force,
@@ -175,13 +183,24 @@ describe('syncStatus verdict', () => {
     expect(s.verdict).toBe('behind');
   });
 
-  it('counts a locally-edited .env as a local change', async () => {
-    const { ctx, root } = await ctxOn(runnerWith({ remoteRevision: 3 }));
+  it('counts a locally-edited .env as a local change under two-way secrets sync', async () => {
+    const { ctx, root } = await ctxOn(runnerWith({ remoteRevision: 3 }), { secretsSync: 'two-way' });
     await patchState(root, { baseRevision: 3, dotenvHash: 'not-the-hash-of-whats-there' });
     await fs.writeFile(path.join(root, '.env'), 'API_KEY="edited"\n');
     const s = await syncStatus(ctx, active(ctx), { probeDatabase: false });
     expect(s.verdict).toBe('ahead');
     expect(s.localChanges).toContain('local edits to the materialized .env');
+  });
+
+  it('ignores a locally-edited .env under pull-only, where the provider is the truth', async () => {
+    // The file is a generated artifact there. materializeSecrets backs it up and
+    // asks (S2); blocking the whole pull over a scratch value would be absurd.
+    const { ctx, root } = await ctxOn(runnerWith({ remoteRevision: 5 }));
+    await patchState(root, { baseRevision: 3, dotenvHash: 'not-the-hash-of-whats-there' });
+    await fs.writeFile(path.join(root, '.env'), 'API_KEY="edited"\n');
+    const s = await syncStatus(ctx, active(ctx), { probeDatabase: false });
+    expect(s.verdict).toBe('behind');
+    expect(s.localChanges).toEqual([]);
   });
 
   it('reports unavailable rather than guessing when storage is off', async () => {
