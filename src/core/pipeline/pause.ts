@@ -4,7 +4,7 @@ import pc from 'picocolors';
 import type { RunContext } from './context.js';
 import { resolveActiveProviders } from './providers.js';
 import { machineName } from '../providers/database/base.js';
-import { loadState, patchState } from '../state.js';
+import { loadState, patchState, snapshotBase } from '../state.js';
 import {
   createSyncTarget,
   encryptionSuffix,
@@ -14,6 +14,7 @@ import {
   snapshotName,
   recordArtifactHash,
   sha256File,
+  type SnapshotEntry,
 } from '../sync/index.js';
 import { PreflightError } from '../util/errors.js';
 import { assertCanPush, type SyncStatus } from './guard.js';
@@ -183,6 +184,54 @@ async function hasRemoteSnapshot(ctx: RunContext, dctx: ReturnType<RunContext['p
   }
 }
 
+/**
+ * Refuse to publish a snapshot taken from a database that has not seen the
+ * newest snapshot on the target (SYNC_SAFETY.md D2).
+ *
+ * A machine offline for a week takes a dump of week-old data, gets today's
+ * timestamp on it, sorts first, and every other machine restores it. Nothing
+ * here looked at what was already on the target beyond "does anything exist".
+ *
+ * The registry guard (`assertCanPush`) usually catches this first, but the sync
+ * target is a separate system: snapshots can exist for a workspace whose
+ * registry entry is missing, stale, or unreachable. This is the check that is
+ * anchored to the artifact itself.
+ *
+ * Returns null to proceed, or a reason to skip.
+ */
+async function snapshotLineageBlock(
+  ctx: RunContext,
+  dctx: ReturnType<RunContext['providerCtx']>,
+  overwriteRemote: boolean,
+): Promise<string | null> {
+  const sync = ctx.config.database!.sync!;
+  let entries: SnapshotEntry[];
+  try {
+    entries = await createSyncTarget(sync, ctx.identities.sync).list(dctx, ctx.config.workspace);
+  } catch {
+    return null; // can't list → don't block the push on it
+  }
+  const newest = entries[0];
+  if (!newest) return null; // nothing published; ours is the first
+
+  const state = await loadState(ctx.workspaceRoot);
+  const base = snapshotBase(state);
+  if (base && newest.timestamp <= base) return null; // we have seen everything there
+
+  const whose = newest.machine ? ` (pushed by ${newest.machine})` : '';
+  const detail = base
+    ? `the target holds a newer snapshot ${newest.timestamp}${whose}; this machine's data only reflects ${base}`
+    : `the target already holds snapshot ${newest.timestamp}${whose}, and this machine has never restored one`;
+
+  if (overwriteRemote) {
+    ctx.logger.warn(`--overwrite-remote: uploading anyway — ${detail}.`);
+    return null;
+  }
+  ctx.logger.warn(`refusing to upload a database snapshot: ${detail}.`);
+  ctx.logger.hint('Run `envbeam pull` to take in the newer snapshot first, or `envbeam push --overwrite-remote` to make this machine authoritative.');
+  return `would publish data older than ${newest.timestamp}`;
+}
+
 async function pauseDatabase(
   ctx: RunContext,
   active: ReturnType<typeof resolveActiveProviders>,
@@ -277,6 +326,16 @@ async function pauseDatabase(
   if (!take) {
     out.skipped = skipReason;
     return out;
+  }
+
+  // Lineage check before doing the expensive thing. Dumping a whole database to
+  // then refuse the upload wastes minutes and leaves a plaintext dump on disk.
+  if (!ctx.dryRun) {
+    const blocked = await snapshotLineageBlock(ctx, dctx, opts.overwriteRemote ?? false);
+    if (blocked) {
+      out.skipped = blocked;
+      return out;
+    }
   }
 
   // produce snapshot

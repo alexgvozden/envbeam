@@ -8,6 +8,11 @@ import { loadState } from '../../src/core/state.js';
 import { createHash } from 'node:crypto';
 import { FakeRunner } from '../helpers/fakeRunner.js';
 import { makeTestContext, tmpDir } from '../helpers/context.js';
+import { AutoPrompter, type AutoPrompterOptions } from '../../src/core/util/prompt.js';
+
+/** AutoPrompter that claims to be a TTY, so interactive-only branches run. */
+const interactivePrompter = (answers: AutoPrompterOptions['answers']) =>
+  new AutoPrompter({ answers, interactive: true });
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -212,5 +217,86 @@ describe('secrets base recording', () => {
     } finally {
       delete process.env.ENVBEAM_HOME;
     }
+  });
+});
+
+// SYNC_SAFETY.md S2 — pull materialized .env with an unconditional writeFile:
+// no read, no diff, no backup. A local scratch value was gone without a trace.
+describe('dotenv local-edit guard', () => {
+  async function scene(opts: { prompter?: AutoPrompter; force?: boolean } = {}) {
+    const { dir: home, cleanup: c1 } = await tmpDir('envbeam-home-');
+    const { dir: ws, cleanup: c2 } = await tmpDir();
+    cleanups.push(c1, c2, async () => void delete process.env.ENVBEAM_HOME);
+    process.env.ENVBEAM_HOME = home;
+    const lines: string[] = [];
+    const ctx = makeTestContext({
+      config: baseConfig({ provider: 'doppler' }),
+      runner: new FakeRunner(),
+      workspaceRoot: ws,
+      force: opts.force,
+      prompter: opts.prompter,
+      logLines: lines,
+    }).providerCtx('secrets');
+    return { ctx, ws, lines };
+  }
+
+  const pulled = (values: Record<string, string>) => ({ values, count: Object.keys(values).length, keys: Object.keys(values) });
+
+  it('overwrites silently when the file is exactly what envbeam last wrote', async () => {
+    const { ctx, ws, lines } = await scene();
+    await materializeSecrets(ctx, pulled({ A: '1' }));
+    const res = await materializeSecrets(ctx, pulled({ A: '2' }));
+    expect(res.backupPath).toBeUndefined();
+    expect(lines.join('\n')).not.toMatch(/local edits/);
+    expect(await fs.readFile(path.join(ws, '.env'), 'utf8')).toContain('A="2"');
+  });
+
+  it('backs up a hand-edited .env before overwriting it, naming only the keys', async () => {
+    const { ctx, ws, lines } = await scene();
+    await materializeSecrets(ctx, pulled({ A: '1' }));
+    await fs.writeFile(path.join(ws, '.env'), 'A="1"\nLOCAL_ONLY="scratch"\n');
+
+    const res = await materializeSecrets(ctx, pulled({ A: '1' }));
+    expect(res.backupPath).toBe('.env.envbeam-backup');
+    expect(await fs.readFile(path.join(ws, '.env.envbeam-backup'), 'utf8')).toContain('scratch');
+    const out = lines.join('\n');
+    expect(out).toMatch(/has local edits/);
+    expect(out).toMatch(/differing key\(s\): LOCAL_ONLY/);
+    expect(out).not.toContain('scratch'); // key names only, never values
+  });
+
+  it('gitignores the backup so a secret never lands in a commit', async () => {
+    const { ctx, ws } = await scene();
+    await materializeSecrets(ctx, pulled({ A: '1' }));
+    await fs.writeFile(path.join(ws, '.env'), 'A="edited"\n');
+    await materializeSecrets(ctx, pulled({ A: '1' }));
+    expect(await fs.readFile(path.join(ws, '.gitignore'), 'utf8')).toContain('.env.envbeam-backup');
+  });
+
+  it('an interactive "no" keeps the local file and does not rebaseline', async () => {
+    const { ctx, ws } = await scene();
+    await materializeSecrets(ctx, pulled({ A: '1' }));
+    const before = await loadState(ws);
+    await fs.writeFile(path.join(ws, '.env'), 'A="edited"\n');
+
+    const res = await materializeSecrets(
+      { ...ctx, prompter: interactivePrompter([{ match: 'Overwrite', value: false }]) },
+      pulled({ A: '1' }),
+    );
+
+    expect(res.skipped).toBe('local edits kept');
+    expect(await fs.readFile(path.join(ws, '.env'), 'utf8')).toBe('A="edited"\n');
+    // The base still describes the bytes we actually wrote, not the ones we didn't.
+    expect((await loadState(ws)).dotenvHash).toBe(before.dotenvHash);
+  });
+
+  it('--yes keeps the historical overwrite behavior, with the backup as the net', async () => {
+    const { ctx, ws } = await scene();
+    await materializeSecrets(ctx, pulled({ A: '1' }));
+    await fs.writeFile(path.join(ws, '.env'), 'A="edited"\n');
+    const res = await materializeSecrets(ctx, pulled({ A: '1' })); // AutoPrompter → non-interactive
+    expect(res.skipped).toBeUndefined();
+    expect(res.backupPath).toBe('.env.envbeam-backup');
+    expect(await fs.readFile(path.join(ws, '.env'), 'utf8')).toContain('A="1"');
   });
 });

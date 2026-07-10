@@ -21,6 +21,7 @@ import {
 import { ensureDir, pathExists } from '../../util/fs.js';
 import { ensureTools } from '../../util/tools.js';
 import { patchState } from '../../state.js';
+import { mergeSessionTree, summarizeMerge, type MergeReport } from './merge.js';
 import { machineName } from '../database/base.js';
 
 /**
@@ -351,7 +352,7 @@ export class ClaudeNativeProvider implements SessionProvider {
     const target = await this.getSyncTarget(ctx);
     if (!target) return { action: 'noop', detail: 'no sync target configured' };
 
-    // Choose the newest encrypted archive for this workspace + scope. Uses
+    // Every encrypted archive for this workspace + scope, newest first. Uses
     // listNames (raw prefix match) — target.list() only understands DB-snapshot
     // filenames. Match scope via an exact filename PREFIX (workspace + scope are
     // values we control) rather than parsing the scope out — a greedy regex
@@ -364,31 +365,59 @@ export class ClaudeNativeProvider implements SessionProvider {
     if (!candidates.length) {
       return { action: 'noop', detail: 'no session backups found' };
     }
-    // Newest archive wins, whoever pushed it. Preferring one from *another*
-    // machine restored a knowingly stale archive over newer local transcripts
-    // whenever this machine held the newest one (SYNC_SAFETY.md T1). If the
-    // newest is ours and nothing changed since, the restore is a no-op — which
-    // is the correct answer, not a reason to reach for an older archive.
-    const chosen = candidates[0]!;
 
-    // Freshness guard (T2): the restore copies whole files over the local tree,
-    // so an archive older than the local transcripts would truncate them.
     const dest = await this.resolveSessionPath(scope, ctx.workspaceRoot);
-    const archiveMs = chosen.parsed ? sessionTimestampMs(chosen.parsed.timestamp) : 0;
-    const localMs = dest.exists ? await newestActivity(dest.dir) : 0;
-    if (archiveMs && localMs > archiveMs) {
-      const detail =
-        `local Claude sessions (last written ${new Date(localMs).toISOString()}) are newer than the ` +
-        `newest backup (${chosen.parsed?.timestamp}, from ${chosen.parsed?.machine ?? 'unknown'})`;
-      if (!ctx.force) {
+
+    // `global` scope is the whole Claude config dir — plugins, todos, shell
+    // snapshots, statsig caches. Union semantics are not meaningful there, so it
+    // keeps the coarse rule: newest archive wins, and never over newer local data.
+    if (scope === 'global') {
+      const chosen = candidates[0]!;
+      const archiveMs = chosen.parsed ? sessionTimestampMs(chosen.parsed.timestamp) : 0;
+      const localMs = dest.exists ? await newestActivity(dest.dir) : 0;
+      if (archiveMs && localMs > archiveMs && !ctx.force) {
         return {
           action: 'noop',
-          detail: `${detail} — not restoring. Push from this machine, or re-run with --force to overwrite them.`,
+          detail:
+            `local Claude data (last written ${new Date(localMs).toISOString()}) is newer than the newest ` +
+            `backup (${chosen.parsed?.timestamp}, from ${chosen.parsed?.machine ?? 'unknown'}) — not restoring. ` +
+            `Push from this machine, or re-run with --force to overwrite it.`,
         };
       }
-      ctx.logger.warn(`--force: overwriting Claude sessions that are newer than the archive (${detail}).`);
+      if (archiveMs && localMs > archiveMs) {
+        ctx.logger.warn('--force: overwriting global Claude data that is newer than the archive.');
+      }
+      return this.restoreArchives(ctx, target, [chosen], dest, scope, workspace);
     }
 
+    // Restore the union of the LATEST archive per machine, oldest first
+    // (SYNC_SAFETY.md T5). Restoring only the single newest archive silently
+    // omits sessions that exist only in a third machine's older archive, so
+    // session sync never converges — no machine ever ends up holding all of it.
+    // Oldest-first so that where a rule is "newest wins" (memory/), the newest
+    // archive genuinely writes last.
+    const latestPerMachine = new Map<string, (typeof candidates)[number]>();
+    for (const c of candidates) {
+      const machine = c.parsed?.machine ?? c.name;
+      if (!latestPerMachine.has(machine)) latestPerMachine.set(machine, c); // candidates are newest-first
+    }
+    const chosen = [...latestPerMachine.values()].reverse();
+    if (chosen.length > 1) {
+      ctx.logger.sub(pc.dim(`merging ${chosen.length} archives (latest per machine: ${[...latestPerMachine.keys()].join(', ')})`));
+    }
+
+    return this.restoreArchives(ctx, target, chosen, dest, scope, workspace);
+  }
+
+  /** Download, verify, decrypt, extract and merge each archive in order. */
+  private async restoreArchives(
+    ctx: ProviderContext,
+    target: NonNullable<Awaited<ReturnType<ClaudeNativeProvider['getSyncTarget']>>>,
+    archives: Array<{ name: string; parsed: ParsedSessionName | null }>,
+    dest: ResolvedSessionPath,
+    scope: string,
+    workspace: string,
+  ): Promise<SessionResult> {
     const syncConfig: SyncConfig | undefined = ctx.config.session?.sync ?? ctx.config.database?.sync;
     if (!syncConfig) return { action: 'noop', detail: 'no sync target configured' };
 
@@ -405,89 +434,131 @@ export class ClaudeNativeProvider implements SessionProvider {
     // path). Everything decrypted/extracted below lives here and is removed in
     // the finally, even on early errors — no plaintext session data lingers.
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'envbeam-session-'));
-    const downloadPath = path.join(tempDir, chosen.name);
-    const archiveBase = chosen.name.replace(/\.age$/, '');
-    const archivePath = path.join(tempDir, archiveBase);
-    const metaPath = path.join(tempDir, archiveBase.replace('.tar.gz', '.meta.json'));
-    const extractDir = path.join(tempDir, 'extract');
+    const reports: MergeReport[] = [];
+    const restored: string[] = [];
+    const failures: string[] = [];
 
     try {
-      try {
-        await target.get(ctx, chosen.name, downloadPath);
-      } catch (e) {
-        return { action: 'noop', detail: `download failed: ${(e as Error).message}` };
-      }
-
-      // Verify the encrypted archive against the Doppler-anchored hash BEFORE
-      // decrypting. A mismatch means the bucket object was tampered/replaced.
-      const verdict = await verifyArtifact(ctx.runner, workspace, chosen.name, downloadPath);
-      if (verdict === 'mismatch') {
-        return { action: 'noop', detail: 'refusing to restore: session archive failed integrity check (Doppler hash mismatch)' };
-      }
-      if (verdict === 'missing') {
-        ctx.logger.warn('no integrity hash on record for this archive — cannot verify it was not tampered');
-      }
-
-      const decryptConfig: SyncConfig = { ...syncConfig, encrypt: 'age' };
-      await decryptFile(ctx, decryptConfig, downloadPath, archivePath);
-      await fs.rm(downloadPath, { force: true });
-      ctx.logger.sub('session decrypted');
-
-      // Metadata (optional): records the source machine's workspace path. It's
-      // plaintext, so only trust it if its integrity hash also verifies.
-      let metadata: { workspaceRoot?: string } = {};
-      const metaName = archiveBase.replace('.tar.gz', '.meta.json');
-      try {
-        await target.get(ctx, metaName, metaPath);
-        if ((await verifyArtifact(ctx.runner, workspace, metaName, metaPath)) !== 'mismatch') {
-          metadata = JSON.parse(await fs.readFile(metaPath, 'utf8'));
-        } else {
-          ctx.logger.warn('session metadata failed integrity check — ignoring it (paths won’t be translated)');
-        }
-      } catch {
-        /* metadata optional */
-      }
-
       ctx.logger.sub(pc.dim(`restoring into ${dest.dir}`));
-
-      // The archive is downloaded from remote storage and is only encrypted for
-      // confidentiality — its CONTENTS are untrusted. `--no-same-owner`, and
-      // after extraction we refuse any symlink (the classic tar breakout) and
-      // copy plain files only, skipping security-sensitive Claude config files.
-      await ensureDir(extractDir);
-      const extractRes = await ctx.runner.run('tar', ['-xzf', archivePath, '--no-same-owner', '-C', extractDir], {
-        cwd: ctx.workspaceRoot,
-        allowFailure: true,
-      });
-      if (extractRes.code !== 0) {
-        return { action: 'noop', detail: `extract failed: ${extractRes.stderr}` };
-      }
-      if (await containsSymlink(extractDir)) {
-        return { action: 'noop', detail: 'refusing to restore: archive contains a symlink (possible tar breakout)' };
-      }
-
-      const [extractedName] = await fs.readdir(extractDir);
-      if (!extractedName) {
-        return { action: 'noop', detail: 'archive was empty' };
-      }
       await ensureDir(path.dirname(dest.dir));
-      await safeCopySessionTree(path.join(extractDir, extractedName), dest.dir, scope);
 
-      // Translate absolute paths inside session files to this machine's layout.
-      // Guard against a bogus/short metadata value that would corrupt files.
-      const src = metadata.workspaceRoot;
-      if (scope === 'project' && src && src !== ctx.workspaceRoot && path.isAbsolute(src) && src.length >= 4) {
-        await this.translatePaths(dest.dir, src, ctx.workspaceRoot);
+      for (const archive of archives) {
+        const machine = archive.parsed?.machine ?? 'unknown';
+        const work = path.join(tempDir, machine);
+        await ensureDir(work);
+        const downloadPath = path.join(work, archive.name);
+        const archiveBase = archive.name.replace(/\.age$/, '');
+        const archivePath = path.join(work, archiveBase);
+        const metaName = archiveBase.replace('.tar.gz', '.meta.json');
+        const metaPath = path.join(work, metaName);
+        const extractDir = path.join(work, 'extract');
+
+        try {
+          await target.get(ctx, archive.name, downloadPath);
+        } catch (e) {
+          failures.push(`${machine}: download failed (${(e as Error).message})`);
+          continue;
+        }
+
+        // Verify the encrypted archive against the Doppler-anchored hash BEFORE
+        // decrypting. A mismatch means the bucket object was tampered/replaced.
+        const verdict = await verifyArtifact(ctx.runner, workspace, archive.name, downloadPath);
+        if (verdict === 'mismatch') {
+          failures.push(`${machine}: failed integrity check (Doppler hash mismatch) — skipped`);
+          continue;
+        }
+        if (verdict === 'missing') {
+          ctx.logger.warn(`no integrity hash on record for ${archive.name} — cannot verify it was not tampered`);
+        }
+
+        await decryptFile(ctx, { ...syncConfig, encrypt: 'age' }, downloadPath, archivePath);
+        await fs.rm(downloadPath, { force: true });
+
+        // Metadata (optional): records the source machine's workspace path. It's
+        // plaintext, so only trust it if its integrity hash also verifies.
+        let metadata: { workspaceRoot?: string } = {};
+        try {
+          await target.get(ctx, metaName, metaPath);
+          if ((await verifyArtifact(ctx.runner, workspace, metaName, metaPath)) !== 'mismatch') {
+            metadata = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+          } else {
+            ctx.logger.warn('session metadata failed integrity check — ignoring it (paths won’t be translated)');
+          }
+        } catch {
+          /* metadata optional */
+        }
+
+        // The archive is downloaded from remote storage and is only encrypted for
+        // confidentiality — its CONTENTS are untrusted. `--no-same-owner`, and
+        // after extraction we refuse any symlink (the classic tar breakout) and
+        // merge plain files only, skipping security-sensitive Claude config files.
+        await ensureDir(extractDir);
+        const extractRes = await ctx.runner.run('tar', ['-xzf', archivePath, '--no-same-owner', '-C', extractDir], {
+          cwd: ctx.workspaceRoot,
+          allowFailure: true,
+        });
+        if (extractRes.code !== 0) {
+          failures.push(`${machine}: extract failed (${extractRes.stderr.trim()})`);
+          continue;
+        }
+        if (await containsSymlink(extractDir)) {
+          failures.push(`${machine}: archive contains a symlink (possible tar breakout) — skipped`);
+          continue;
+        }
+
+        const [extractedName] = await fs.readdir(extractDir);
+        if (!extractedName) {
+          failures.push(`${machine}: archive was empty`);
+          continue;
+        }
+        const tree = path.join(extractDir, extractedName);
+
+        // Translate absolute paths to this machine's layout BEFORE merging, so
+        // the byte comparison against local transcripts is apples to apples.
+        // Guard against a bogus/short metadata value that would corrupt files.
+        const src = metadata.workspaceRoot;
+        if (scope === 'project' && src && src !== ctx.workspaceRoot && path.isAbsolute(src) && src.length >= 4) {
+          await this.translatePaths(tree, src, ctx.workspaceRoot);
+        }
+
+        reports.push(
+          scope === 'global'
+            ? await this.copyWholeTree(tree, dest.dir)
+            : await mergeSessionTree(tree, dest.dir, machine),
+        );
+        restored.push(machine);
       }
 
-      await patchState(ctx.workspaceRoot, { baseSessionName: chosen.name });
+      for (const f of failures) ctx.logger.warn(`session: ${f}`);
+      if (!restored.length) {
+        return { action: 'noop', detail: failures.join('; ') || 'nothing restored' };
+      }
+
+      const sidecars = reports.flatMap((r) => r.sidecars);
+      if (sidecars.length) {
+        ctx.logger.warn(
+          `${sidecars.length} session file(s) diverged — the remote copy was written beside yours, nothing was overwritten:`,
+        );
+        for (const s of sidecars.slice(0, 10)) ctx.logger.sub(pc.dim(`  ${s}`));
+      }
+
+      // The base is the newest archive we successfully merged.
+      const newest = archives[archives.length - 1];
+      if (newest) await patchState(ctx.workspaceRoot, { baseSessionName: newest.name });
+
       return {
         action: 'pulled',
-        detail: `${scope} session restored from ${chosen.parsed?.machine ?? 'another machine'} (${chosen.parsed?.timestamp ?? 'latest'}) → ${dest.dir}`,
+        detail: `${scope} session merged from ${restored.join(', ')} (${summarizeMerge(reports)}) → ${dest.dir}`,
       };
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  /** `global` scope: coarse whole-tree copy, as before (§7 scope caveat). */
+  private async copyWholeTree(src: string, dest: string): Promise<MergeReport> {
+    await safeCopySessionTree(src, dest, 'global');
+    return { actions: [], sidecars: [] };
   }
 
   /**

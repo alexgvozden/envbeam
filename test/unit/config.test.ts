@@ -145,3 +145,20 @@ describe('config explain', () => {
     expect(Object.keys(FIELD_DOCS).length).toBeGreaterThan(20);
   });
 });
+
+// SYNC_SAFETY.md S4 — the 1Password provider has no push method, so `two-way`
+// was accepted and then silently did nothing on every push.
+describe('secrets.sync validation', () => {
+  const cfg = (secrets: object) => ({ version: 1, workspace: 'w', secrets });
+
+  it('rejects two-way sync on the onepassword provider', () => {
+    const res = workspaceConfigSchema.safeParse(cfg({ provider: 'onepassword', item: 'x', sync: 'two-way' }));
+    expect(res.success).toBe(false);
+    expect(JSON.stringify(res.error?.issues)).toMatch(/not supported by the onepassword provider/);
+  });
+
+  it('allows pull-only on onepassword and two-way on doppler', () => {
+    expect(workspaceConfigSchema.safeParse(cfg({ provider: 'onepassword', item: 'x', sync: 'pull-only' })).success).toBe(true);
+    expect(workspaceConfigSchema.safeParse(cfg({ provider: 'doppler', sync: 'two-way' })).success).toBe(true);
+  });
+});

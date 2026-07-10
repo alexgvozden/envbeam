@@ -123,6 +123,10 @@ export interface MaterializeResult {
   mode: 'dotenv' | 'run-wrapper';
   path?: string;
   count: number;
+  /** Relative path of the backup written before overwriting local edits. */
+  backupPath?: string;
+  /** Set when local edits were found and the user chose to keep them. */
+  skipped?: string;
 }
 
 export interface SecretsPushResult {

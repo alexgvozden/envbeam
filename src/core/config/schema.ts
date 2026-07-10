@@ -52,7 +52,15 @@ export const secretsConfigSchema = z
       .default('pull-only')
       .describe('Sync mode: pull-only (provider is source of truth) or two-way (push local changes on pause).'),
   })
-  .strict();
+  .strict()
+  // The 1Password provider has no `push` method, so `two-way` was accepted and
+  // then silently did nothing on every push (SYNC_SAFETY.md S4). Say so at
+  // config-load time rather than letting the user believe their edits synced.
+  .refine((s) => !(s.provider === 'onepassword' && s.sync === 'two-way'), {
+    message:
+      'secrets.sync: "two-way" is not supported by the onepassword provider (it cannot push). Use "pull-only" and edit secrets in 1Password.',
+    path: ['sync'],
+  });
 
 export const containerConfigSchema = z
   .object({

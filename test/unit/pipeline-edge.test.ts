@@ -245,6 +245,85 @@ describe('resume edge cases', () => {
   });
 });
 
+// SYNC_SAFETY.md D2 — a machine offline for a week has no local changes, and
+// that is exactly why publishing its week-old dump is dangerous: its snapshot
+// gets today's timestamp, sorts first, and everyone else restores it.
+describe('pause snapshot lineage (D2)', () => {
+  async function targetWith(timestamp: string, machine = 'desktop'): Promise<string> {
+    const syncDir = path.join(home, 'snaps');
+    await fs.mkdir(syncDir, { recursive: true });
+    await fs.writeFile(path.join(syncDir, snapshotName('keeper', timestamp, machine, 'sql')), '-- sql\n');
+    return syncDir;
+  }
+
+  it('refuses to upload when the target holds a snapshot this machine never restored', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const syncDir = await targetWith('20260701T120000Z');
+    await patchState(dir, { lastRestoredTimestamp: '20260601T120000Z' }); // stale base
+    const runner = baseRunner();
+    const lines: string[] = [];
+    const report = await runPause(
+      await ctxOn(dir, runner, snapConfig({ target: 'local-folder', path: syncDir }), undefined, { logLines: lines }),
+      { force: false, snapshot: true, workMode: 'none' },
+    );
+    expect(report.database?.snapshot).toBeUndefined();
+    expect(report.database?.skipped).toBe('would publish data older than 20260701T120000Z');
+    expect(lines.join('\n')).toMatch(/refusing to upload a database snapshot/);
+    // The expensive dump never ran.
+    expect(runner.calls.some((c) => c.command === 'pg_dump' && c.args.includes('-f'))).toBe(false);
+  });
+
+  it('refuses when this machine has never restored any snapshot at all', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const syncDir = await targetWith('20260701T120000Z', 'laptop');
+    const lines: string[] = [];
+    const report = await runPause(
+      await ctxOn(dir, baseRunner(), snapConfig({ target: 'local-folder', path: syncDir }), undefined, { logLines: lines }),
+      { force: false, snapshot: true, workMode: 'none' },
+    );
+    expect(report.database?.snapshot).toBeUndefined();
+    expect(lines.join('\n')).toMatch(/has never restored one/);
+  });
+
+  it('uploads when this machine has already seen the newest snapshot', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const syncDir = await targetWith('20260701T120000Z');
+    await patchState(dir, { lastRestoredTimestamp: '20260701T120000Z' });
+    const report = await runPause(
+      await ctxOn(dir, baseRunner(), snapConfig({ target: 'local-folder', path: syncDir })),
+      { force: false, snapshot: true, workMode: 'none' },
+    );
+    expect(report.database?.snapshot).toBeTruthy();
+  });
+
+  it('uploads the first snapshot for a workspace without complaint', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const report = await runPause(
+      await ctxOn(dir, baseRunner(), snapConfig({ target: 'local-folder', path: path.join(home, 'empty-snaps') })),
+      { force: false, snapshot: true, workMode: 'none' },
+    );
+    expect(report.database?.snapshot).toBeTruthy();
+  });
+
+  it('--overwrite-remote uploads anyway, and says what it overrode', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const syncDir = await targetWith('20260701T120000Z');
+    await patchState(dir, { lastRestoredTimestamp: '20260601T120000Z' });
+    const lines: string[] = [];
+    const report = await runPause(
+      await ctxOn(dir, baseRunner(), snapConfig({ target: 'local-folder', path: syncDir }), undefined, { logLines: lines }),
+      { force: false, overwriteRemote: true, snapshot: true, workMode: 'none' },
+    );
+    expect(report.database?.snapshot).toBeTruthy();
+    expect(lines.join('\n')).toMatch(/--overwrite-remote: uploading anyway/);
+  });
+});
+
 describe('pause edge cases', () => {
   it('--no-snapshot forces skip in snapshot mode', async () => {
     const { dir, cleanup } = await tmpDir();

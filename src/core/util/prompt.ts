@@ -56,13 +56,19 @@ export class TerminalPrompter implements Prompter {
 export interface AutoPrompterOptions {
   defaults?: boolean;
   answers?: Array<{ match: string | RegExp; value: string | boolean }>;
+  /**
+   * Claim to be a TTY. Guards that refuse to resolve a divergence without a
+   * human branch on `interactive`, and tests need to exercise both sides.
+   */
+  interactive?: boolean;
 }
 
 export class AutoPrompter implements Prompter {
-  readonly interactive = false;
+  readonly interactive: boolean;
   private readonly opts: AutoPrompterOptions;
   constructor(opts: AutoPrompterOptions = {}) {
     this.opts = opts;
+    this.interactive = opts.interactive ?? false;
   }
 
   private scripted(message: string): string | boolean | undefined {

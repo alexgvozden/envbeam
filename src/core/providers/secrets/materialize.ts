@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import type { MaterializeResult, ProviderContext, SecretsPullResult } from '../types.js';
 import { ensureDir, ensureGitignored } from '../../util/fs.js';
-import { patchState, type SecretsBase } from '../../state.js';
+import { loadState, patchState, type SecretsBase } from '../../state.js';
 
 const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
 
@@ -43,6 +43,59 @@ function renderRunEnv(values: Record<string, string>): string {
 }
 
 /**
+ * Which keys differ between the file on disk and what we are about to write.
+ * Only key NAMES are ever surfaced — a value must not reach a log or a prompt.
+ */
+function changedKeyNames(existing: string, next: Record<string, string>): string[] {
+  const before = parseDotenv(existing);
+  const names = new Set([...Object.keys(before), ...Object.keys(next)]);
+  return [...names].filter((k) => before[k] !== next[k]).sort();
+}
+
+/**
+ * Guard an overwrite of a file the user may have hand-edited (SYNC_SAFETY.md S2).
+ * Reports whether to write, and where the pre-overwrite copy was saved.
+ *
+ * `dotenvHash` is the hash of the bytes envbeam itself last wrote. A file that
+ * still matches it has no local edits and is overwritten silently, as before.
+ * A file that differs is backed up first, always — the values in it may exist
+ * nowhere else.
+ */
+async function guardLocalEdits(
+  ctx: ProviderContext,
+  file: string,
+  rel: string,
+  nextValues: Record<string, string>,
+): Promise<{ write: boolean; backupPath?: string }> {
+  const state = await loadState(ctx.workspaceRoot);
+  let existing: string;
+  try {
+    existing = await fs.readFile(file, 'utf8');
+  } catch {
+    return { write: true }; // nothing there to lose
+  }
+  // No recorded hash (first pull on this machine, or pre-0.19 state) or an
+  // untouched file: nothing to protect.
+  if (!state.dotenvHash || sha256(existing) === state.dotenvHash) return { write: true };
+
+  const changed = changedKeyNames(existing, nextValues);
+  const backupRel = `${rel}.envbeam-backup`;
+  await fs.writeFile(path.join(ctx.workspaceRoot, backupRel), existing, { mode: 0o600 });
+  await ensureGitignored(ctx.workspaceRoot, backupRel);
+
+  ctx.logger.warn(`${rel} has local edits that envbeam did not write.`);
+  if (changed.length) ctx.logger.sub(`  differing key(s): ${changed.join(', ')}`);
+  ctx.logger.sub(`  saved a copy to ${backupRel}`);
+
+  if (ctx.force || !ctx.prompter.interactive) {
+    // `--yes` keeps the historical overwrite behavior; the backup is the safety net.
+    return { write: true, backupPath: backupRel };
+  }
+  const overwrite = await ctx.prompter.confirm(`Overwrite ${rel} with the values from the provider?`, true);
+  return { write: overwrite, backupPath: backupRel };
+}
+
+/**
  * Materialize pulled secrets into the runtime mechanism (PRD §7.3). Never
  * writes anything git-tracked: the output path is gitignored.
  */
@@ -53,38 +106,32 @@ export async function materializeSecrets(
   const cfg = ctx.config.secrets;
   const mode = cfg?.output ?? 'dotenv';
 
-  if (mode === 'run-wrapper') {
-    const dir = path.join(ctx.workspaceRoot, '.envbeam');
-    const file = path.join(dir, 'runenv.sh');
-    if (!ctx.dryRun) {
-      await ensureDir(dir);
-      const content = renderRunEnv(pulled.values);
-      await fs.writeFile(file, content, { mode: 0o600 });
-      await ensureGitignored(ctx.workspaceRoot, '.envbeam/');
-      await patchState(ctx.workspaceRoot, {
-        secretsBase: { ...hashSecrets(pulled.values), pulledAt: new Date().toISOString() },
-        dotenvHash: sha256(content),
-      });
-    }
-    return { mode, path: path.relative(ctx.workspaceRoot, file), count: pulled.count };
+  const rel = mode === 'run-wrapper' ? path.join('.envbeam', 'runenv.sh') : cfg?.dotenvPath ?? '.env';
+  const file = path.join(ctx.workspaceRoot, rel);
+  const content = mode === 'run-wrapper' ? renderRunEnv(pulled.values) : renderDotenv(pulled.values);
+
+  if (ctx.dryRun) return { mode, path: rel, count: pulled.count };
+
+  const guard = await guardLocalEdits(ctx, file, rel, pulled.values);
+  if (!guard.write) {
+    ctx.logger.sub(`kept your ${rel}; the provider's values were not written`);
+    return { mode, path: rel, count: pulled.count, backupPath: guard.backupPath, skipped: 'local edits kept' };
   }
 
-  const rel = cfg?.dotenvPath ?? '.env';
-  const file = path.join(ctx.workspaceRoot, rel);
-  if (!ctx.dryRun) {
-    await ensureDir(path.dirname(file));
-    const content = renderDotenv(pulled.values);
-    await fs.writeFile(file, content, { mode: 0o600 });
-    await ensureGitignored(ctx.workspaceRoot, rel);
-    // Record the base: what the provider held, and the exact bytes we wrote.
-    // A later pull compares the file on disk against `dotenvHash` to tell a
-    // local edit apart from "unchanged since we generated it".
-    await patchState(ctx.workspaceRoot, {
-      secretsBase: { ...hashSecrets(pulled.values), pulledAt: new Date().toISOString() },
-      dotenvHash: sha256(content),
-    });
-  }
-  return { mode, path: rel, count: pulled.count };
+  await ensureDir(path.dirname(file));
+  await fs.writeFile(file, content, { mode: 0o600 });
+  await ensureGitignored(ctx.workspaceRoot, mode === 'run-wrapper' ? '.envbeam/' : rel);
+
+  // Record the base: what the provider held, and the exact bytes we wrote. A
+  // later pull compares the file on disk against `dotenvHash` to tell a local
+  // edit apart from "unchanged since we generated it", and a two-way push uses
+  // `secretsBase` to attribute each changed key to a side.
+  await patchState(ctx.workspaceRoot, {
+    secretsBase: { ...hashSecrets(pulled.values), pulledAt: new Date().toISOString() },
+    dotenvHash: sha256(content),
+  });
+
+  return { mode, path: rel, count: pulled.count, backupPath: guard.backupPath };
 }
 
 /** Parse a dotenv file's KEY=value pairs (handles quotes + `export`). */

@@ -13,7 +13,9 @@ import type {
   ToolRequirement,
 } from '../types.js';
 import type { ProviderFactory } from '../registry.js';
-import { EnvbeamError } from '../../util/errors.js';
+import { EnvbeamError, SafetyError } from '../../util/errors.js';
+import { loadState } from '../../state.js';
+import { threeWayMergeSecrets } from './threeWay.js';
 import { materializeSecrets, readMaterialized, parseDotenv } from './materialize.js';
 
 function dopplerEnv(ctx: ProviderContext): Record<string, string> {
@@ -151,6 +153,76 @@ export class DopplerSecretsProvider implements SecretsProvider {
     };
   }
 
+  /**
+   * Fold the provider's current secrets into ours. Returns the set to upload,
+   * or null if the user declined to resolve a conflict.
+   *
+   * Conflicts are never resolved by a rule: a key both sides changed, to
+   * different values, has no correct automatic answer. Non-interactive runs
+   * refuse (`--yes` is not consent to discard a secret), and `--force` keeps the
+   * local value while saying which keys it overwrote.
+   */
+  private async mergeWithRemote(
+    ctx: ProviderContext,
+    local: Record<string, string>,
+  ): Promise<Record<string, string> | null> {
+    const state = await loadState(ctx.workspaceRoot);
+
+    let remote: Record<string, string>;
+    try {
+      remote = (await this.pull(ctx)).values;
+    } catch (e) {
+      ctx.logger.warn(`could not read current Doppler secrets to merge (${(e as Error).message}) — uploading local set`);
+      return local;
+    }
+    for (const k of Object.keys(remote)) {
+      if (k.startsWith('DOPPLER_') || k.startsWith('ENVBEAM_')) delete remote[k];
+    }
+
+    const result = threeWayMergeSecrets(state.secretsBase, local, remote);
+
+    if (result.degraded && (result.conflicts.length || result.remoteWins.length)) {
+      ctx.logger.warn('no recorded secrets base for this workspace — cannot tell which side changed a key.');
+      ctx.logger.hint('Run `envbeam pull` once to record a base; until then differing keys are treated as conflicts.');
+    }
+    if (result.remoteWins.length) {
+      ctx.logger.sub(`folding in ${result.remoteWins.length} key(s) changed in Doppler: ${result.remoteWins.join(', ')}`);
+    }
+    if (result.removedLocally.length) {
+      ctx.logger.warn(
+        `${result.removedLocally.length} key(s) are missing from your .env but still in Doppler: ${result.removedLocally.join(', ')}.`,
+      );
+      ctx.logger.hint('envbeam never deletes a provider secret. Remove them in Doppler if that was intended.');
+    }
+
+    if (!result.conflicts.length) return result.merged;
+
+    const names = result.conflicts.map((c) => c.key);
+    if (ctx.force) {
+      ctx.logger.warn(`--force: keeping the local value for ${names.length} conflicting key(s): ${names.join(', ')}`);
+      for (const c of result.conflicts) result.merged[c.key] = c.local;
+      return result.merged;
+    }
+    if (!ctx.prompter.interactive) {
+      throw new SafetyError(
+        `${names.length} secret(s) changed both here and in Doppler since this machine last pulled: ${names.join(', ')}.`,
+        'Re-run interactively to choose per key, or pass --force to keep the local values.',
+      );
+    }
+
+    ctx.logger.warn(`${names.length} secret(s) changed on both sides since this machine last pulled.`);
+    for (const c of result.conflicts) {
+      const keep = await ctx.prompter.select(`Which value should "${c.key}" have?`, [
+        { name: 'keep the value in Doppler', value: 'remote' },
+        { name: 'use the value from your .env', value: 'local' },
+        { name: 'cancel the secrets push', value: 'cancel' },
+      ]);
+      if (keep === 'cancel') return null;
+      result.merged[c.key] = keep === 'local' ? c.local : c.remote;
+    }
+    return result.merged;
+  }
+
   async push(ctx: ProviderContext): Promise<SecretsPushResult> {
     const cfg = ctx.config.secrets;
     const envPath = path.join(ctx.workspaceRoot, cfg?.dotenvPath ?? '.env');
@@ -169,18 +241,29 @@ export class DopplerSecretsProvider implements SecretsProvider {
       if (!k.startsWith('DOPPLER_') && !k.startsWith('ENVBEAM_')) filtered[k] = v;
     }
 
-    const keys = Object.keys(filtered);
-    if (keys.length === 0) {
+    if (Object.keys(filtered).length === 0) {
       return { count: 0, keys: [], action: 'noop', detail: 'no secrets to push' };
     }
 
     if (ctx.dryRun) {
-      return { count: keys.length, keys, action: 'uploaded', detail: `would upload ${keys.length} secret(s)` };
+      const n = Object.keys(filtered).length;
+      return { count: n, keys: Object.keys(filtered), action: 'uploaded', detail: `would upload ${n} secret(s)` };
     }
+
+    // Re-pull and merge before writing. Uploading `.env` wholesale meant a
+    // machine whose file predates another's push would publish a set that never
+    // saw the newer key (SYNC_SAFETY.md S1). Uploading the merged union is safe
+    // whether `doppler secrets upload` replaces the config's secret set or
+    // merges into it — we never depend on which.
+    const merged = await this.mergeWithRemote(ctx, filtered);
+    if (!merged) {
+      return { count: 0, keys: [], action: 'skipped', detail: 'secrets merge declined' };
+    }
+    const keys = Object.keys(merged);
 
     // Write to temp file for upload
     const tmpFile = path.join(ctx.workspaceRoot, '.envbeam-push-tmp.env');
-    const lines = Object.entries(filtered).map(([k, v]) => `${k}=${v}`);
+    const lines = Object.entries(merged).map(([k, v]) => `${k}=${v}`);
     await fs.writeFile(tmpFile, lines.join('\n'), { mode: 0o600 });
 
     try {

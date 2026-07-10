@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-07-10
+
+Phase 4 of `planning/SYNC_SAFETY.md`: per-domain merges. The guards in 0.21.0 stop a whole operation; this makes the operations themselves lossless, so there is far less to stop.
+
+### Fixed
+- **Session restore merges per file instead of copying over the tree (T3).** `safeCopySessionTree` `copyFile`d each file, so restoring an archive whose `<uuid>.jsonl` was shorter than the local one truncated it, unrecoverably. The new `session/merge.ts` classifies each file: absent locally → copy; local is a byte-prefix of remote → fast-forward; remote is a prefix of local → we're ahead, leave it; neither → **diverged**, keep local and write the remote as `<uuid>.remote-<machine>.jsonl`. Nothing is ever truncated. The prefix test *verifies* append-only rather than assuming it — an in-place rewrite (compaction, redaction) fails the test and is classified diverged.
+- **Session restore takes the union of the latest archive per machine (T5).** It restored a single archive, so with three machines the sessions that existed only in machine C's older archive were silently omitted and session sync never converged. Archives are now merged oldest-first, so where a rule is "newest wins" the newest genuinely writes last.
+- **`memory/**` has an explicit rule (T6).** It is shared, mutable, rewritten in place, and keyed by nothing, so union does nothing for it. Newest mtime wins — and the displaced bytes are always written beside the winner (`.local-backup` / `.remote-<machine>`), because "last writer wins" must not mean "the other writer's notes are gone."
+- **Two-way secrets push does a three-way merge instead of a blind upload (S1).** It read `.env` and uploaded it wholesale: a machine whose file predated another's push published a set that had never seen the newer key. `secrets/threeWay.ts` compares each key's `sha256` against the recorded base to attribute the change to a side, folds in non-conflicting changes from both, and prompts per conflicting key (refusing non-interactively, since `--yes` is not consent to discard a secret). **This closes open question §12.1 without needing its answer:** the merged *union* is uploaded, which is safe whether `doppler secrets upload` replaces the config's secret set or merges into it. Deletions never propagate implicitly — a key gone from `.env` but still in Doppler is reported, not deleted.
+- **`.env` is no longer overwritten silently on pull (S2).** A hand-edited file is detected against `dotenvHash`, copied to `<path>.envbeam-backup` (0600, gitignored), and — interactively — you are asked before it is replaced. Only key *names* are ever printed, never values. `--yes` keeps the historical overwrite behavior, with the backup as the safety net.
+- **`push` refuses to publish a database snapshot older than the newest one on the sync target (D2).** `hasRemoteSnapshot()` only asked *whether* a snapshot existed, never whether it was newer than our base. A machine offline for a week would upload week-old data under today's timestamp, and every other machine would restore it. The check runs *before* the dump, so a refused push doesn't spend minutes writing a plaintext database dump it then throws away. Escape hatch: `--overwrite-remote`.
+- **`secrets.sync: two-way` on the `onepassword` provider is now a config error (S4).** The provider has no `push` method, so `pause.ts` skipped it and the push silently did nothing.
+
+### Added
+- `AutoPrompter({interactive})` so both sides of the interactive/non-interactive guards are exercised in tests.
+- `MaterializeResult.backupPath` / `.skipped`.
+
 ## [0.21.0] - 2026-07-10
 
 Phase 3 of `planning/SYNC_SAFETY.md`: the guards. Both pipelines now compute where this machine stands relative to the remote **before** touching anything, and refuse the operations that would destroy state nobody else has a copy of.
