@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.1] - 2026-07-10
+
+Phase 1 of `planning/SYNC_SAFETY.md`: start recording a **base** — the remote state this machine last observed, whether by pulling it or by pushing it. No behavior depends on it yet; the guards in the next phase do. Shipping it first means machines have a base by the time those guards start reading one.
+
+### Added
+- **`WorkspaceState` gains `baseRevision`, `baseGitCommit`, `baseSnapshotName`, `baseSessionName`, `secretsBase`, and `dotenvHash`** (`core/state.ts`). `secretsBase` holds a set hash plus per-key value hashes — never a plaintext value — so a two-way push can later do a key-level three-way diff.
+- **Write points:** `baseGitCommit` on every resume and on a successful push; `baseSnapshotName` on snapshot upload and on restore; `baseSessionName` on session push and pull; `secretsBase` + `dotenvHash` whenever secrets are materialized (both `dotenv` and `run-wrapper` output modes). Nothing is recorded under `--dry-run`.
+- **`GitStatus.commit`** — the full sha of HEAD, absent on an unborn branch.
+- **`gitIsAncestor()` / `gitHasCommit()`** in `providers/git/git.ts`. Commit ancestry is the only decidable lineage test envbeam has; anchoring the other domains' checkpoints to a commit sha is what will let `pull` verify that the code it restores data *into* contains the migrations that data expects.
+
 ## [0.19.0] - 2026-07-10
 
 Phase 0 of `planning/SYNC_SAFETY.md`: the four paths where `pull` could destroy data that existed nowhere else. Each is a real, reachable bug, not a hypothetical, and each now has a regression test that fails against the previous code.

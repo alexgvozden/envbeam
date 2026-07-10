@@ -32,7 +32,7 @@ export interface PauseOptions {
 }
 
 export interface PauseReport {
-  git?: GitPushResult & { branch: string };
+  git?: GitPushResult & { branch: string; commit?: string };
   database?: {
     snapshot?: { timestamp: string; file: string; sizeBytes: number };
     skipped?: string;
@@ -83,6 +83,12 @@ export async function runPause(ctx: RunContext, opts: PauseOptions): Promise<Pau
   if (push.committed) log.sub('committed working changes');
   if (push.stashed) log.sub('stashed working changes');
   log.sub(push.pushed ? push.detail ?? 'pushed' : push.detail ?? 'not pushed');
+  // Re-read HEAD: pushWork may have just committed, moving it.
+  if (!ctx.dryRun && push.pushed) {
+    const after = await active.git.status(gctx);
+    report.git.commit = after.commit;
+    if (after.commit) await patchState(ctx.workspaceRoot, { baseGitCommit: after.commit });
+  }
 
   // 2. Database
   if (ctx.config.database) {
@@ -330,7 +336,7 @@ async function pauseDatabase(
     const ok = await recordArtifactHash(dctx.runner, ctx.config.workspace, uploadName, await sha256File(uploadFile), live);
     if (!ok) log.warn('could not record snapshot integrity hash in Doppler — restore cannot verify this snapshot');
 
-    await patchState(ctx.workspaceRoot, { lastSnapshotTimestamp: timestamp });
+    await patchState(ctx.workspaceRoot, { lastSnapshotTimestamp: timestamp, baseSnapshotName: entry.name });
     out.snapshot = { timestamp, file: entry.name, sizeBytes: result.sizeBytes };
     log.sub(`snapshot pushed → ${entry.name} (${sizeMB.toFixed(1)}MB)`);
     return out;

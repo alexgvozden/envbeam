@@ -72,6 +72,8 @@ export interface GitStatus {
   dirtyFiles: string[];
   hasUpstream: boolean;
   remoteUrl?: string;
+  /** Full sha of HEAD. Absent on an unborn branch (no commits yet). */
+  commit?: string;
 }
 
 export interface GitPullResult {

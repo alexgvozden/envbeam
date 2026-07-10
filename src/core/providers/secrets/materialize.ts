@@ -1,7 +1,23 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import type { MaterializeResult, ProviderContext, SecretsPullResult } from '../types.js';
 import { ensureDir, ensureGitignored } from '../../util/fs.js';
+import { patchState, type SecretsBase } from '../../state.js';
+
+const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
+
+/**
+ * Hash a secret set so we can tell later whether it changed, and *which keys*
+ * changed, without ever writing a plaintext value to `WorkspaceState` (which
+ * lives in the state dir, not the repo, but is still not a secret store).
+ */
+export function hashSecrets(values: Record<string, string>): Omit<SecretsBase, 'pulledAt'> {
+  const keys = Object.keys(values).sort();
+  const keyHashes: Record<string, string> = {};
+  for (const k of keys) keyHashes[k] = sha256(values[k]!);
+  return { hash: sha256(keys.map((k) => `${k}=${keyHashes[k]}`).join('\n')), keyHashes };
+}
 
 /** Escape a value for a double-quoted dotenv assignment. */
 export function dotenvEscape(value: string): string {
@@ -42,8 +58,13 @@ export async function materializeSecrets(
     const file = path.join(dir, 'runenv.sh');
     if (!ctx.dryRun) {
       await ensureDir(dir);
-      await fs.writeFile(file, renderRunEnv(pulled.values), { mode: 0o600 });
+      const content = renderRunEnv(pulled.values);
+      await fs.writeFile(file, content, { mode: 0o600 });
       await ensureGitignored(ctx.workspaceRoot, '.envbeam/');
+      await patchState(ctx.workspaceRoot, {
+        secretsBase: { ...hashSecrets(pulled.values), pulledAt: new Date().toISOString() },
+        dotenvHash: sha256(content),
+      });
     }
     return { mode, path: path.relative(ctx.workspaceRoot, file), count: pulled.count };
   }
@@ -52,8 +73,16 @@ export async function materializeSecrets(
   const file = path.join(ctx.workspaceRoot, rel);
   if (!ctx.dryRun) {
     await ensureDir(path.dirname(file));
-    await fs.writeFile(file, renderDotenv(pulled.values), { mode: 0o600 });
+    const content = renderDotenv(pulled.values);
+    await fs.writeFile(file, content, { mode: 0o600 });
     await ensureGitignored(ctx.workspaceRoot, rel);
+    // Record the base: what the provider held, and the exact bytes we wrote.
+    // A later pull compares the file on disk against `dotenvHash` to tell a
+    // local edit apart from "unchanged since we generated it".
+    await patchState(ctx.workspaceRoot, {
+      secretsBase: { ...hashSecrets(pulled.values), pulledAt: new Date().toISOString() },
+      dotenvHash: sha256(content),
+    });
   }
   return { mode, path: rel, count: pulled.count };
 }

@@ -4,6 +4,15 @@ import { createHash } from 'node:crypto';
 import { stateDir } from './config/paths.js';
 import { ensureDir, readFileIfExists } from './util/fs.js';
 
+/** Hashes of the secret set we last pulled. Never holds a plaintext value. */
+export interface SecretsBase {
+  /** sha256 over the sorted `k=v` set — changes when any key or value changes. */
+  hash: string;
+  /** Per-key sha256 of the value, so a three-way diff can be key-level. */
+  keyHashes: Record<string, string>;
+  pulledAt: string;
+}
+
 export interface WorkspaceState {
   /** Last DB change-detection fingerprint observed. */
   dbFingerprint?: string;
@@ -11,6 +20,26 @@ export interface WorkspaceState {
   lastSnapshotTimestamp?: string;
   /** Timestamp string of the last snapshot this machine restored. */
   lastRestoredTimestamp?: string;
+
+  /*
+   * The BASE: the remote state this machine last observed, by pulling it or by
+   * pushing it. "Did the remote move since we last synced?" is a comparison
+   * against these, and it is the only question that distinguishes a safe
+   * fast-forward from a divergence (SYNC_SAFETY.md §3).
+   */
+
+  /** Registry revision this machine last observed. Absent = never synced. */
+  baseRevision?: number;
+  /** Full sha of the commit the base checkpoint names. */
+  baseGitCommit?: string;
+  /** File name of the snapshot our database currently reflects. */
+  baseSnapshotName?: string;
+  /** File name of the session archive our transcripts currently reflect. */
+  baseSessionName?: string;
+  /** Hashes of the secret set we last pulled from the provider. */
+  secretsBase?: SecretsBase;
+  /** sha256 of the dotenv file exactly as envbeam last wrote it. */
+  dotenvHash?: string;
 }
 
 /**

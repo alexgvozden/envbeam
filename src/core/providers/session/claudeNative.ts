@@ -20,6 +20,7 @@ import {
 } from '../../storage/global.js';
 import { ensureDir, pathExists } from '../../util/fs.js';
 import { ensureTools } from '../../util/tools.js';
+import { patchState } from '../../state.js';
 import { machineName } from '../database/base.js';
 
 /**
@@ -332,6 +333,7 @@ export class ClaudeNativeProvider implements SessionProvider {
       if (recorded) ctx.logger.sub(pc.dim('integrity hash recorded'));
       else ctx.logger.warn('could not record integrity hash in Doppler — restore cannot verify this archive');
 
+      await patchState(ctx.workspaceRoot, { baseSessionName: uploadName });
       return { action: 'pushed', detail: `${scope} session pushed (encrypted with age)` };
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
@@ -478,6 +480,7 @@ export class ClaudeNativeProvider implements SessionProvider {
         await this.translatePaths(dest.dir, src, ctx.workspaceRoot);
       }
 
+      await patchState(ctx.workspaceRoot, { baseSessionName: chosen.name });
       return {
         action: 'pulled',
         detail: `${scope} session restored from ${chosen.parsed?.machine ?? 'another machine'} (${chosen.parsed?.timestamp ?? 'latest'}) → ${dest.dir}`,

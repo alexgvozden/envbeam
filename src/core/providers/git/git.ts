@@ -41,6 +41,33 @@ async function resolveBranch(ctx: ProviderContext): Promise<string> {
   return 'HEAD';
 }
 
+/**
+ * Whether `ancestor` is reachable from `descendant` — git's own definition of
+ * "this state descends from that one", and the only decidable lineage test
+ * envbeam has (SYNC_SAFETY.md §10.4). Anchoring a checkpoint's other artifacts
+ * to a commit sha lets `pull` verify that the code it is about to restore data
+ * *into* actually contains the migrations that data expects.
+ *
+ * Returns false when either sha is unknown to this repo, which is the safe
+ * answer: an unreachable commit is not an ancestor.
+ */
+export async function gitIsAncestor(
+  ctx: ProviderContext,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  if (!/^[0-9a-f]{7,40}$/i.test(ancestor) || !/^[0-9a-f]{7,40}$/i.test(descendant)) return false;
+  const res = await git(ctx, ['merge-base', '--is-ancestor', ancestor, descendant], true);
+  return res.code === 0;
+}
+
+/** Whether the repo has an object for `sha` at all (it may need fetching). */
+export async function gitHasCommit(ctx: ProviderContext, sha: string): Promise<boolean> {
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) return false;
+  const res = await git(ctx, ['cat-file', '-e', `${sha}^{commit}`], true);
+  return res.code === 0;
+}
+
 export class GitProviderImpl implements GitProvider {
   readonly name = 'git';
   readonly kind = 'git' as const;
@@ -89,7 +116,12 @@ export class GitProviderImpl implements GitProvider {
     const url = await git(ctx, ['remote', 'get-url', cfg.remote], true);
     if (url.code === 0) remoteUrl = url.stdout.trim();
 
-    return { branch, ahead, behind, dirtyFiles, hasUpstream, remoteUrl };
+    // Fails on an unborn branch — a repo with no commits has no HEAD to name.
+    let commit: string | undefined;
+    const head = await git(ctx, ['rev-parse', 'HEAD'], true);
+    if (head.code === 0 && /^[0-9a-f]{40}$/i.test(head.stdout.trim())) commit = head.stdout.trim();
+
+    return { branch, ahead, behind, dirtyFiles, hasUpstream, remoteUrl, commit };
   }
 
   async pull(ctx: ProviderContext): Promise<GitPullResult> {

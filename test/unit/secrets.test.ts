@@ -3,7 +3,9 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { DopplerSecretsProvider } from '../../src/core/providers/secrets/doppler.js';
 import { OnePasswordSecretsProvider } from '../../src/core/providers/secrets/onepassword.js';
-import { renderDotenv, dotenvEscape, parseDotenv } from '../../src/core/providers/secrets/materialize.js';
+import { renderDotenv, dotenvEscape, parseDotenv, hashSecrets, materializeSecrets } from '../../src/core/providers/secrets/materialize.js';
+import { loadState } from '../../src/core/state.js';
+import { createHash } from 'node:crypto';
 import { FakeRunner } from '../helpers/fakeRunner.js';
 import { makeTestContext, tmpDir } from '../helpers/context.js';
 
@@ -149,5 +151,66 @@ describe('onepassword provider', () => {
     const runner = new FakeRunner({ available: ['op'] });
     const provider = new OnePasswordSecretsProvider();
     await expect(provider.pull(ctxFor(baseConfig({ provider: 'onepassword' }), runner, dir))).rejects.toThrow(/requires `secrets.item`/);
+  });
+});
+
+// SYNC_SAFETY.md §6 / Phase 1 — record what the provider held and what we wrote,
+// so a later pull can tell a local .env edit apart from an untouched file, and a
+// two-way push can do a key-level three-way diff.
+describe('secrets base recording', () => {
+  it('hashSecrets is order-independent and never stores a plaintext value', () => {
+    const a = hashSecrets({ B: 'two', A: 'one' });
+    const b = hashSecrets({ A: 'one', B: 'two' });
+    expect(a.hash).toBe(b.hash);
+    expect(Object.keys(a.keyHashes).sort()).toEqual(['A', 'B']);
+    expect(JSON.stringify(a)).not.toContain('one');
+    expect(JSON.stringify(a)).not.toContain('two');
+  });
+
+  it('changes the set hash when any value changes, and pins it to the key', () => {
+    const before = hashSecrets({ A: 'one', B: 'two' });
+    const after = hashSecrets({ A: 'one', B: 'CHANGED' });
+    expect(after.hash).not.toBe(before.hash);
+    expect(after.keyHashes.A).toBe(before.keyHashes.A);
+    expect(after.keyHashes.B).not.toBe(before.keyHashes.B);
+  });
+
+  it('materialize records secretsBase and the hash of the bytes it wrote', async () => {
+    const { dir: home, cleanup: c1 } = await tmpDir('envbeam-home-');
+    const { dir: ws, cleanup: c2 } = await tmpDir();
+    cleanups.push(c1, c2);
+    process.env.ENVBEAM_HOME = home;
+    try {
+      const ctx = ctxFor(baseConfig({ provider: 'doppler' }), new FakeRunner(), ws);
+      await materializeSecrets(ctx, { values: { API_KEY: 'k' }, count: 1 });
+
+      const state = await loadState(ws);
+      expect(state.secretsBase?.hash).toBe(hashSecrets({ API_KEY: 'k' }).hash);
+      expect(state.secretsBase?.pulledAt).toBeTruthy();
+
+      const written = await fs.readFile(path.join(ws, '.env'), 'utf8');
+      expect(state.dotenvHash).toBe(createHash('sha256').update(written).digest('hex'));
+    } finally {
+      delete process.env.ENVBEAM_HOME;
+    }
+  });
+
+  it('records nothing under --dry-run', async () => {
+    const { dir: home, cleanup: c1 } = await tmpDir('envbeam-home-');
+    const { dir: ws, cleanup: c2 } = await tmpDir();
+    cleanups.push(c1, c2);
+    process.env.ENVBEAM_HOME = home;
+    try {
+      const ctx = makeTestContext({
+        config: baseConfig({ provider: 'doppler' }),
+        runner: new FakeRunner(),
+        workspaceRoot: ws,
+        dryRun: true,
+      }).providerCtx('secrets');
+      await materializeSecrets(ctx, { values: { API_KEY: 'k' }, count: 1 });
+      expect(await loadState(ws)).toEqual({});
+    } finally {
+      delete process.env.ENVBEAM_HOME;
+    }
   });
 });

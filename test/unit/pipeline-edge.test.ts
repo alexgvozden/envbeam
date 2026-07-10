@@ -208,6 +208,33 @@ describe('resume edge cases', () => {
     });
   });
 
+  // SYNC_SAFETY.md §10.2 / Phase 1 — the base is what later guards compare against.
+  it('records baseGitCommit and baseSnapshotName on both push and restore', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const syncDir = path.join(home, 'snaps');
+    const runner = baseRunner();
+    const sha = 'a'.repeat(40);
+    runner.on('git rev-parse HEAD', { stdout: `${sha}\n` });
+
+    const pushed = await runPause(await ctxOn(dir, runner, snapConfig({ target: 'local-folder', path: syncDir })), {
+      force: false,
+      snapshot: true,
+      workMode: 'none',
+    });
+    const afterPush = await loadState(dir);
+    expect(afterPush.baseGitCommit).toBe(sha);
+    expect(afterPush.baseSnapshotName).toBe(pushed.database?.snapshot?.file);
+
+    // A restore re-points the base at whatever it restored.
+    await fs.writeFile(path.join(syncDir, snapshotName('keeper', '20270101T000000Z', 'other', 'sql')), '-- sql\n');
+    const resumed = await runResume(await ctxOn(dir, runner, snapConfig({ target: 'local-folder', path: syncDir }, { restore: 'auto' })));
+    expect(resumed.database?.restored?.timestamp).toBe('20270101T000000Z');
+    const afterPull = await loadState(dir);
+    expect(afterPull.baseSnapshotName).toBe('keeper__20270101T000000Z__other.sql');
+    expect(afterPull.baseGitCommit).toBe(sha);
+  });
+
   it('migrations-only mode never restores even with snapshots present', async () => {
     const { dir, cleanup } = await tmpDir();
     cleanups.push(cleanup);

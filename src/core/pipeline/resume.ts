@@ -115,8 +115,12 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
   const gctx = ctx.providerCtx('git');
   const pull = await active.git.pull(gctx);
   const gstatus = await active.git.status(gctx);
-  report.git = { ...pull, branch: gstatus.branch };
+  report.git = { ...pull, branch: gstatus.branch, commit: gstatus.commit };
   describeGitPull(ctx, pull, gstatus.branch);
+  // The commit we ended up on is the git half of this machine's base.
+  if (!ctx.dryRun && gstatus.commit) {
+    await patchState(ctx.workspaceRoot, { baseGitCommit: gstatus.commit });
+  }
 
   // 3. Secrets
   if (active.secrets) {
@@ -326,6 +330,7 @@ async function resumeDatabase(
     const after = await active.database.hasChanged(dctx, undefined);
     await patchState(ctx.workspaceRoot, {
       lastRestoredTimestamp: latest.timestamp,
+      baseSnapshotName: latest.name,
       ...(after.fingerprint ? { dbFingerprint: after.fingerprint } : {}),
     });
     out.restored = { timestamp: latest.timestamp, file: latest.name };
