@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import { buildRunContext, type RunContext } from '../core/pipeline/context.js';
 import { runPause, type PauseOptions } from '../core/pipeline/pause.js';
 import { makeLogger, makePrompter, runCommand, type GlobalCliOptions } from './shared.js';
-import { createRegistryStore, type ProjectEntry } from '../core/registry/index.js';
+import { createRegistryStore, type ProjectEntryInput } from '../core/registry/index.js';
 import { ensureStorageReady } from './storage.js';
 import { getMachineId } from '../core/util/machine.js';
 import { detectedValue, resolveBranch } from '../core/detect/types.js';
@@ -190,7 +190,7 @@ export async function pushCommand(opts: PushCliOptions): Promise<number> {
         const configContent = await fs.readFile(ctx.configPath, 'utf8');
         const machineId = await getMachineId();
 
-        const entry: ProjectEntry = {
+        const entry: ProjectEntryInput = {
           name: ctx.config.workspace,
           gitRemote: detectedValue(ctx.detection, 'git.url') ?? '',
           gitBranch: resolveBranch(ctx.detection, ctx.config.git?.branch),

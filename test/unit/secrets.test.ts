@@ -182,7 +182,7 @@ describe('secrets base recording', () => {
     process.env.ENVBEAM_HOME = home;
     try {
       const ctx = ctxFor(baseConfig({ provider: 'doppler' }), new FakeRunner(), ws);
-      await materializeSecrets(ctx, { values: { API_KEY: 'k' }, count: 1 });
+      await materializeSecrets(ctx, { values: { API_KEY: 'k' }, count: 1, keys: ['API_KEY'] });
 
       const state = await loadState(ws);
       expect(state.secretsBase?.hash).toBe(hashSecrets({ API_KEY: 'k' }).hash);
@@ -207,7 +207,7 @@ describe('secrets base recording', () => {
         workspaceRoot: ws,
         dryRun: true,
       }).providerCtx('secrets');
-      await materializeSecrets(ctx, { values: { API_KEY: 'k' }, count: 1 });
+      await materializeSecrets(ctx, { values: { API_KEY: 'k' }, count: 1, keys: ['API_KEY'] });
       expect(await loadState(ws)).toEqual({});
     } finally {
       delete process.env.ENVBEAM_HOME;

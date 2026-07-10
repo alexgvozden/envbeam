@@ -8,7 +8,7 @@ import { detectWorkspace } from '../core/detect/index.js';
 import { detectedValue, getField, resolveBranch } from '../core/detect/types.js';
 import { parseConfig } from '../core/config/load.js';
 import { RealCommandRunner, type CommandRunner } from '../core/util/exec.js';
-import { isStorageConfigured, createRegistryStore, type ProjectEntry } from '../core/registry/index.js';
+import { isStorageConfigured, createRegistryStore, type ProjectEntryInput } from '../core/registry/index.js';
 import { checkSecretsAuth, loginHint, isInteractive } from '../core/providers/secretsAuth.js';
 import { pullCommand } from './pull.js';
 import { ensureStorageReady } from './storage.js';
@@ -262,7 +262,7 @@ export async function initCommand(opts: InitOptions): Promise<number> {
           logger.hint('Use a different workspace name or run `envbeam delete` first.');
         } else {
           const machineId = await getMachineId();
-          const entry: ProjectEntry = {
+          const entry: ProjectEntryInput = {
             name: workspace,
             gitRemote: gitUrl ?? '',
             gitBranch: resolveBranch(detection),

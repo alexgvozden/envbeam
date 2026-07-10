@@ -1,6 +1,6 @@
 {
   "name": "envbeam",
-  "version": "0.19.1",
+  "version": "0.20.0",
   "description": "Pause your work on one machine, resume it whole on another: code, secrets, container, database, and Claude session — under the right account for each.",
   "type": "module",
   "bin": {

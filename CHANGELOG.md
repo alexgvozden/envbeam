@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-07-10
+
+Phase 2 of `planning/SYNC_SAFETY.md`: give the registry a total order that does not depend on any machine's clock, and stop concurrent pushes from silently deleting each other.
+
+### Added
+- **`revision` on every project entry** — a monotonic integer, incremented on each successful push. This is the ordering envbeam has been missing: `lastPush` is a local wall-clock string, so a laptop three minutes fast permanently won every race. `lastPush` and `machineId` are now documented as human-readable metadata, never read for ordering. Old registries parse: `revision` defaults to `0`.
+- **`checkpoint` on every project entry** (`registry/types.ts`) — `{revision, gitCommit, gitBranch, snapshotName?, sessionName?, secretsHash?, machineId, at}`. Schema only; Phase 5 writes it.
+- **`registerProject(entry, {expectedRevision})`** returns the stored entry with its new revision, and refuses with a `SafetyError` when the remote entry has moved past the caller's base — so an old machine can't overwrite a newer push's `configSnapshot` and checkpoint (**R2**).
+
+### Fixed
+- **Concurrent pushes of different projects no longer drop one of them (R1).** The registry is a single JSON object holding every project, and `registerProject` was a plain read-modify-write against S3: two machines pushing at once, and the second `save()` erased the first machine's entry. Writes are now conditional on the ETag read (`aws s3api put-object --if-match`), with a bounded retry that reloads and re-applies *only our own entry*, leaving the other machine's write intact. A registry that doesn't exist yet is created with `--if-none-match '*'`, so exactly one racing machine creates it.
+- **`initializeIfNeeded` no longer has a check-then-write window** where two machines setting up at once could have one overwrite the other's freshly-populated registry with an empty one.
+- Endpoints without conditional-write support (some MinIO/R2 versions) are detected from the CLI/endpoint error, fall back to an unconditional write, and then **read back and verify** — a lost update cannot be prevented there, but it is reported loudly with the names of the dropped projects rather than passing silently.
+
 ## [0.19.1] - 2026-07-10
 
 Phase 1 of `planning/SYNC_SAFETY.md`: start recording a **base** — the remote state this machine last observed, whether by pulling it or by pushing it. No behavior depends on it yet; the guards in the next phase do. Shipping it first means machines have a base by the time those guards start reading one.

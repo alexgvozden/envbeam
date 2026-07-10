@@ -5,7 +5,7 @@ import { loadGlobalConfig } from '../config/globalConfig.js';
 import { detectedValue } from '../detect/types.js';
 import { getMachineId } from '../util/machine.js';
 import { RegistryStore } from './store.js';
-import type { ProjectEntry } from './types.js';
+import type { ProjectEntryInput } from './types.js';
 
 /**
  * Check if the current project is registered in the registry.
@@ -57,7 +57,7 @@ export async function checkProjectRegistration(ctx: RunContext): Promise<boolean
     const machineId = await getMachineId();
     const gitRemote = detectedValue(ctx.detection, 'git.remoteUrl') ?? '';
 
-    const entry: ProjectEntry = {
+    const entry: ProjectEntryInput = {
       name: projectName,
       gitRemote,
       gitBranch: ctx.config.git?.branch ?? 'main',

@@ -4,14 +4,36 @@ import path from 'node:path';
 import { loadGlobalConfig, saveGlobalConfig } from '../config/globalConfig.js';
 import { REGISTRY_FILE_NAME } from '../config/paths.js';
 import type { GlobalStorageConfig } from '../config/schema.js';
-import { EnvbeamError } from '../util/errors.js';
+import { EnvbeamError, SafetyError } from '../util/errors.js';
 import type { CommandRunner } from '../util/exec.js';
 import {
   type ProjectEntry,
+  type ProjectEntryInput,
   type ProjectRegistry,
+  projectEntrySchema,
   projectRegistrySchema,
   EMPTY_REGISTRY,
 } from './types.js';
+
+/** The registry object does not exist yet. */
+function isNotFound(stderr: string): boolean {
+  return /\b404\b|NoSuchKey|does not exist|Not Found/i.test(stderr);
+}
+
+/** Our ETag no longer matches (or the key appeared under `--if-none-match '*'`). */
+export function isPreconditionFailed(stderr: string): boolean {
+  return /\b412\b|PreconditionFailed|\b409\b|ConditionalRequestConflict/i.test(stderr);
+}
+
+/**
+ * The CLI or the endpoint doesn't do conditional writes. Old aws-cli rejects the
+ * flag outright; S3-compatible endpoints answer 501 or reject the header.
+ */
+export function isConditionalWriteUnsupported(stderr: string): boolean {
+  return /Unknown options?:.*--if-(match|none-match)|no such option|\b501\b|NotImplemented|InvalidArgument.*[Ii]f-[Mm]atch/i.test(
+    stderr,
+  );
+}
 
 /**
  * Registry store that syncs project registry to/from S3.
@@ -84,90 +106,210 @@ export class RegistryStore {
 
   /** Load registry from S3. Returns empty registry if not found. */
   async load(): Promise<ProjectRegistry> {
+    return (await this.loadWithEtag()).registry;
+  }
+
+  /**
+   * Load the registry along with its ETag, the token a conditional write uses to
+   * say "only if nobody else has written since I read this". `etag` is undefined
+   * when the object does not exist yet — the caller then writes with
+   * `--if-none-match '*'` so exactly one racing machine creates it.
+   */
+  private async loadWithEtag(): Promise<{ registry: ProjectRegistry; etag?: string }> {
     const env = await this.getS3Env();
-    const tmpFile = path.join(os.tmpdir(), `envbeam-registry-${Date.now()}.json`);
+    const tmpFile = path.join(os.tmpdir(), `envbeam-registry-${process.pid}-${Date.now()}.json`);
 
     try {
+      // s3api (not `s3 cp`) so the response metadata, and with it the ETag, is
+      // available on stdout.
       const res = await this.runner.run(
         'aws',
-        ['s3', 'cp', this.registryUri(), tmpFile, ...this.baseArgs()],
+        ['s3api', 'get-object', '--bucket', this.storage.bucket, '--key', REGISTRY_FILE_NAME, tmpFile, ...this.baseArgs()],
         { allowFailure: true, env },
       );
 
       if (res.code !== 0) {
-        // Check if file doesn't exist (404)
-        if (res.stderr.includes('404') || res.stderr.includes('does not exist') || res.stderr.includes('NoSuchKey')) {
-          return structuredClone(EMPTY_REGISTRY);
-        }
+        if (isNotFound(res.stderr)) return { registry: structuredClone(EMPTY_REGISTRY) };
         throw new EnvbeamError(`Failed to load registry from S3: ${res.stderr}`, { exitCode: 2 });
       }
 
-      const content = await fs.readFile(tmpFile, 'utf8');
-      const parsed = JSON.parse(content);
-      const result = projectRegistrySchema.safeParse(parsed);
+      let etag: string | undefined;
+      try {
+        etag = (JSON.parse(res.stdout) as { ETag?: string }).ETag;
+      } catch {
+        /* some endpoints print nothing; we fall back to an unconditional write */
+      }
 
+      const content = await fs.readFile(tmpFile, 'utf8');
+      const result = projectRegistrySchema.safeParse(JSON.parse(content));
       if (!result.success) {
         throw new EnvbeamError(`Invalid registry format: ${result.error.message}`, { exitCode: 2 });
       }
-
-      return result.data;
+      return { registry: result.data, etag };
     } finally {
-      // Clean up temp file
       await fs.unlink(tmpFile).catch(() => {});
     }
   }
 
-  /** Save registry to S3. */
+  /** Save registry to S3, unconditionally. */
   async save(registry: ProjectRegistry): Promise<void> {
-    const env = await this.getS3Env();
-    const tmpFile = path.join(os.tmpdir(), `envbeam-registry-${Date.now()}.json`);
+    const res = await this.put(registry, {});
+    if (!res.ok) {
+      throw new EnvbeamError(`Failed to save registry to S3: ${res.stderr}`, { exitCode: 2 });
+    }
+  }
 
+  /**
+   * Write the registry, optionally only if the remote object still matches the
+   * ETag we read (`ifMatch`), or only if it does not exist (`ifNoneMatch`).
+   * Reports a lost race as `{ ok: false, precondition: true }` rather than
+   * throwing, so the caller can reload and re-apply.
+   */
+  private async put(
+    registry: ProjectRegistry,
+    cond: { ifMatch?: string; ifNoneMatch?: boolean },
+  ): Promise<{ ok: true } | { ok: false; precondition: boolean; unsupported: boolean; stderr: string }> {
+    const env = await this.getS3Env();
+    const tmpFile = path.join(os.tmpdir(), `envbeam-registry-${process.pid}-${Date.now()}.json`);
     try {
       await fs.writeFile(tmpFile, JSON.stringify(registry, null, 2));
+      const args = [
+        's3api',
+        'put-object',
+        '--bucket',
+        this.storage.bucket,
+        '--key',
+        REGISTRY_FILE_NAME,
+        '--body',
+        tmpFile,
+        ...this.baseArgs(),
+      ];
+      if (cond.ifMatch) args.push('--if-match', cond.ifMatch);
+      if (cond.ifNoneMatch) args.push('--if-none-match', '*');
 
-      const res = await this.runner.run(
-        'aws',
-        ['s3', 'cp', tmpFile, this.registryUri(), ...this.baseArgs()],
-        { allowFailure: true, env },
-      );
-
-      if (res.code !== 0) {
-        throw new EnvbeamError(`Failed to save registry to S3: ${res.stderr}`, { exitCode: 2 });
-      }
+      const res = await this.runner.run('aws', args, { allowFailure: true, env });
+      if (res.code === 0) return { ok: true };
+      return {
+        ok: false,
+        precondition: isPreconditionFailed(res.stderr),
+        unsupported: isConditionalWriteUnsupported(res.stderr),
+        stderr: res.stderr,
+      };
     } finally {
       await fs.unlink(tmpFile).catch(() => {});
     }
   }
 
-  /** Register or update a project. Throws if name conflicts with different git remote. */
-  async registerProject(entry: ProjectEntry): Promise<void> {
-    const registry = await this.load();
+  /**
+   * Register or update a project, assigning it the next revision.
+   *
+   * This is a read-modify-write on a single JSON object holding *every* project,
+   * so two machines pushing different projects at the same time used to drop one
+   * of them entirely (SYNC_SAFETY.md R1). The write is now conditional on the
+   * ETag we read; on a lost race we reload and re-apply only *our* entry, which
+   * leaves the other machine's write intact.
+   *
+   * `expectedRevision` makes the write refuse when the remote entry has moved
+   * since this machine's base — that is a divergence, and overwriting the
+   * `configSnapshot` and checkpoint of a newer push would be a silent regression
+   * (R2). Omit it to force.
+   */
+  async registerProject(
+    entry: ProjectEntryInput,
+    opts: { expectedRevision?: number } = {},
+  ): Promise<ProjectEntry> {
+    const MAX_ATTEMPTS = 5;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const { registry, etag } = await this.loadWithEtag();
+      const existing = registry.projects[entry.name];
 
-    // Check for name conflicts
-    const existing = registry.projects[entry.name];
-    if (existing && existing.gitRemote !== entry.gitRemote) {
+      if (existing && existing.gitRemote !== entry.gitRemote) {
+        throw new EnvbeamError(
+          `Project "${entry.name}" already exists with a different git remote.\n` +
+          `Existing: ${existing.gitRemote}\n` +
+          `New: ${entry.gitRemote}\n` +
+          `Choose a unique workspace name in your .envbeam.yaml.`,
+          { exitCode: 1 },
+        );
+      }
+
+      // Divergence, not a race: retrying cannot make this succeed.
+      if (opts.expectedRevision !== undefined && existing && existing.revision !== opts.expectedRevision) {
+        throw new SafetyError(
+          `Project "${entry.name}" is at revision ${existing.revision} in the registry, ` +
+            `but this machine last saw revision ${opts.expectedRevision}. Another machine has pushed since.`,
+          'Run `envbeam pull` to catch up, or re-run with --force to overwrite the remote checkpoint.',
+        );
+      }
+
+      const next: ProjectEntry = projectEntrySchema.parse({
+        ...entry,
+        revision: (existing?.revision ?? 0) + 1,
+      });
+      registry.projects[entry.name] = next;
+
+      const res = await this.put(registry, etag ? { ifMatch: etag } : { ifNoneMatch: true });
+      if (res.ok) return next;
+
+      if (res.precondition) continue; // someone else wrote; reload and re-apply
+      if (res.unsupported) return this.registerWithoutCas(registry, next);
+
+      throw new EnvbeamError(`Failed to save registry to S3: ${res.stderr}`, { exitCode: 2 });
+    }
+    throw new EnvbeamError(
+      `Could not update the project registry after ${MAX_ATTEMPTS} attempts — it is being written concurrently.`,
+      { exitCode: 2, hint: 'Retry in a moment.' },
+    );
+  }
+
+  /**
+   * Fallback for endpoints without conditional writes (some MinIO/R2 versions):
+   * write unconditionally, then read back and verify nothing we saw disappeared.
+   * This cannot *prevent* a lost update — it can only tell the user one happened,
+   * which is strictly better than the silence R1 describes.
+   */
+  private async registerWithoutCas(registry: ProjectRegistry, entry: ProjectEntry): Promise<ProjectEntry> {
+    this.warnedNoCas ||= true;
+    const expected = Object.keys(registry.projects).sort();
+    await this.save(registry);
+
+    const after = await this.load();
+    const lost = expected.filter((n) => !(n in after.projects));
+    if (lost.length || after.projects[entry.name]?.revision !== entry.revision) {
       throw new EnvbeamError(
-        `Project "${entry.name}" already exists with a different git remote.\n` +
-        `Existing: ${existing.gitRemote}\n` +
-        `New: ${entry.gitRemote}\n` +
-        `Choose a unique workspace name in your .envbeam.yaml.`,
-        { exitCode: 1 },
+        `The storage endpoint does not support conditional writes, and a concurrent push raced this one.` +
+          (lost.length ? ` Project(s) dropped from the registry: ${lost.join(', ')}.` : ''),
+        {
+          exitCode: 2,
+          hint: 'Re-run `envbeam push`. To prevent this, use a bucket whose endpoint supports S3 conditional writes (If-Match).',
+        },
       );
     }
-
-    registry.projects[entry.name] = entry;
-    await this.save(registry);
+    return entry;
   }
+
+  /** True once a write had to fall back to a non-conditional put. */
+  warnedNoCas = false;
 
   /** Unregister a project by name. Returns true if found and removed. */
   async unregisterProject(name: string): Promise<boolean> {
-    const registry = await this.load();
-    if (!(name in registry.projects)) {
-      return false;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const { registry, etag } = await this.loadWithEtag();
+      if (!(name in registry.projects)) return false;
+      delete registry.projects[name];
+
+      const res = await this.put(registry, etag ? { ifMatch: etag } : {});
+      if (res.ok) return true;
+      if (res.precondition) continue;
+      if (res.unsupported) {
+        await this.save(registry);
+        return true;
+      }
+      throw new EnvbeamError(`Failed to save registry to S3: ${res.stderr}`, { exitCode: 2 });
     }
-    delete registry.projects[name];
-    await this.save(registry);
-    return true;
+    throw new EnvbeamError('Could not update the project registry — it is being written concurrently.', {
+      exitCode: 2,
+    });
   }
 
   /** Get a project by name. */
@@ -188,25 +330,32 @@ export class RegistryStore {
     return name in registry.projects;
   }
 
-  /** Initialize empty registry in S3 if it doesn't exist. */
+  /**
+   * Initialize an empty registry in S3 if it doesn't exist. Creates it with
+   * `--if-none-match '*'` so that two machines setting up at once cannot have
+   * one overwrite the other's freshly-created (and possibly already populated)
+   * registry with an empty one — the check-then-write it used to do had exactly
+   * that window.
+   */
   async initializeIfNeeded(): Promise<boolean> {
     const env = await this.getS3Env();
 
-    // Check if registry exists
     const res = await this.runner.run(
       'aws',
       ['s3api', 'head-object', '--bucket', this.storage.bucket, '--key', REGISTRY_FILE_NAME, ...this.baseArgs()],
       { allowFailure: true, env },
     );
+    if (res.code === 0) return false; // already exists
 
-    if (res.code === 0) {
-      // Already exists
-      return false;
+    const created = await this.put(EMPTY_REGISTRY, { ifNoneMatch: true });
+    if (created.ok) return true;
+    // Someone created it in the window. That is the outcome we wanted anyway.
+    if (created.precondition) return false;
+    if (created.unsupported) {
+      await this.save(EMPTY_REGISTRY);
+      return true;
     }
-
-    // Create empty registry
-    await this.save(EMPTY_REGISTRY);
-    return true;
+    throw new EnvbeamError(`Failed to create registry in S3: ${created.stderr}`, { exitCode: 2 });
   }
 }
 
