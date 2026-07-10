@@ -53,7 +53,7 @@ Corollary the user asked about directly: *pull must not restore something older 
 
 **Verdict: safe.** Git already implements the invariant. Two residual issues, neither about staleness:
 
-- **G1.** `pushWork` with `workMode: 'commit'` runs `git add -A` (`git/git.ts:135`) — commits everything, including files the user never intended to track. Out of scope here; worth its own issue.
+- **G1.** `pushWork` with `workMode: 'commit'` runs `git add -A` (`git/git.ts:135`) — commits everything, including files the user never intended to track. *Scoped out here, and that was wrong: `push --yes` published an untracked `api-key.txt` to the remote with no prompt. Fixed in 0.25.0 — untracked files are staged only on an explicit yes.*
 - **G2.** A skipped git step (dirty tree → `skipped-dirty`) does **not** stop the DB restore that follows. See §9 — this is the coherence bug, and it's the most dangerous item in this document.
 
 **Decision:** leave the git provider alone. Use it as the reference implementation, and use commit SHAs as the anchor for the other domains' lineage (§10).
@@ -458,7 +458,7 @@ not "we found bugs" but *which kinds* of bug survive a green test suite.
 
 | # | Domain | Case | Today | Shipped in |
 |---|---|---|---|---|
-| G1 | git | `add -A` commits everything | as described | out of scope |
+| G1 | git | `add -A` commits everything, including untracked secrets, and pushes them | **fixed** — untracked staged only on an explicit yes | 0.25.0 |
 | G2 | git | skipped pull doesn't stop DB restore | **fixed** — checkpoint's `gitCommit` must be an ancestor of HEAD | 0.23.0 |
 | D1 | db | restores your own snapshot over newer local data | **fixed** — `snapshotBase()` reads the push side too | 0.19.0 |
 | D2 | db | stale machine's snapshot wins by timestamp | **fixed** — `assertCanPush` refuses on `behind`; `snapshotLineageBlock` refuses the upload | 0.21.0, 0.22.0 |
@@ -466,6 +466,7 @@ not "we found bugs" but *which kinds* of bug survive a green test suite.
 | D4 | db | restore clobbers unsaved local changes | **fixed** — `hasChanged()` before restore, never auto, pre-restore dump | 0.19.0 |
 | D5 | db | fingerprint misses in-place updates | prompts say so; never used to suppress a confirmation | 0.19.0 |
 | D6 | db | *a failed restore reported success* | **fixed** — `ON_ERROR_STOP`; restore replaces rather than appends | 0.24.0 |
+| D7 | db | *mysql data-only restore appended instead of replacing* | **fixed** — truncate first, FK checks off | 0.24.3 |
 | S1 | secrets | two-way push from stale `.env` | **fixed** — three-way merge, union upload | 0.22.0 |
 | S2 | secrets | `.env` overwritten silently on pull | **fixed** — hash, back up, confirm | 0.22.0 |
 | S3 | secrets | no base recorded | **fixed** — `secretsBase` (hashes only) | 0.19.1 |
