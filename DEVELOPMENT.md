@@ -4,12 +4,12 @@ Working notes for continuing development across machines. If you just want to *u
 
 ---
 
-## Current status (2026-07-08, v0.16.0)
+## Current status (2026-07-10, v0.18.2)
 
-**MVP complete; cross-machine registry and at-rest integrity/encryption shipped.** Everything in PRD §§6–12 is implemented and tested.
+**MVP complete; cross-machine registry and at-rest integrity/encryption shipped. Published to npm.** Everything in PRD §§6–12 is implemented and tested.
 
-- 24 test files, **204 unit tests passing**. `npm run typecheck` and `npm run build` pass.
-- One integration test (`postgres:14` round trip) currently fails on this host due to a pg client/server version skew, not a code regression: the host `pg_dump` emits `SET transaction_timeout` (a Postgres 17+ parameter) that the `postgres:14` container rejects on restore. See the client-major-≥-server-major gotcha below; match the test container to your host client (or bump both) to run it green.
+- 27 test files, **241 tests passing** (unit + integration). `npm run typecheck` and `npm run build` pass.
+- Known gap: `planning/SYNC_SAFETY.md` documents four live data-loss paths in the staleness/divergence handling (DB restore, session pull) that are **not yet fixed**. See its Phase 0.
 
 ### Done
 - Two pipelines (`resume`/`pull`, `pause`/`push`) + `status`, all `--dry-run` capable.

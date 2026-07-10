@@ -94,8 +94,7 @@ envbeam pull                     # pick up: branch, secrets, container, DB, sess
 
 That's the whole happy path — `init` detects your git account automatically, so most single-account setups need no extra configuration.
 
-- **Work + personal accounts?** Route each concern to the right one — see [Identities](#identities-multi-account).
-- **Want database snapshots and your Claude session to travel too** (not just code + secrets)? Run `envbeam storage setup` once — see [Global storage](#global-storage).
+Working across a work and a personal account? Route each concern to the right one — see [Identities](#identities-multi-account).
 
 ---
 
@@ -378,17 +377,7 @@ export function register(registry) {
 
 ## Development
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for the architecture map and design decisions.
-
-```bash
-npm install
-npm run typecheck
-npm test               # unit + integration (integration auto-skips when a tool is absent)
-npm run build          # → dist/
-npm run schema:gen     # regenerate schema/envbeam.schema.json
-```
-
-Every external CLI call goes through an injectable command runner, so all providers are covered deterministically without real credentials. Integration tests use real tools when present (git always; Docker for Postgres / Compose / Dev Containers, auto-skipped when the daemon is down).
+See [DEVELOPMENT.md](DEVELOPMENT.md) for the architecture map, the test strategy, and design decisions.
 
 ## License
 

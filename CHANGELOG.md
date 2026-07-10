@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.3] - 2026-07-10
+
+### Changed
+- **README** — dropped the "run `envbeam storage setup` once" prompt from the quick start (`init` handles it, and the commands are already listed), and collapsed the Development section into a pointer to `DEVELOPMENT.md` rather than duplicating its command table.
+- **DEVELOPMENT.md** — refreshed the status block: 241 tests across 27 files, the `postgres:14` version-skew integration failure is resolved, and the unfixed data-loss paths in `planning/SYNC_SAFETY.md` are now called out.
+
 ## [0.18.2] - 2026-07-10
 
 ### Changed
