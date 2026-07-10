@@ -5,12 +5,15 @@ import type { RunContext } from './context.js';
 import { resolveActiveProviders } from './providers.js';
 import { runPreflight, assertSecretsAuth, type ToolCheck } from './preflight.js';
 import { runMigrateCommand } from '../providers/database/migrate.js';
-import { loadState, patchState } from '../state.js';
+import { machineName } from '../providers/database/base.js';
+import { stateDir } from '../config/paths.js';
+import { loadState, patchState, snapshotBase } from '../state.js';
 import {
   createSyncTarget,
   decryptFile,
   detectEncryptFromName,
   ensureAgeKeys,
+  formatTimestamp,
   verifyArtifact,
   type SnapshotEntry,
 } from '../sync/index.js';
@@ -32,6 +35,8 @@ export interface ResumeReport {
     migrated: boolean;
     migrateDetail?: string;
     restored?: { timestamp: string; file: string };
+    /** Why a snapshot that exists on the sync target was not restored. */
+    restoreSkipped?: string;
   };
 }
 
@@ -242,14 +247,60 @@ async function resumeDatabase(
   }
 
   const state = await loadState(ctx.workspaceRoot);
-  const newer = !state.lastRestoredTimestamp || latest.timestamp > state.lastRestoredTimestamp;
-  if (!newer) {
-    log.sub('local DB already reflects the latest snapshot');
-    return out;
+  const base = snapshotBase(state);
+
+  // Lineage guard (SYNC_SAFETY.md D1). `base` covers snapshots we pushed as well
+  // as ones we restored, so our own dump can never look "newer" than us. When
+  // the remote sorts strictly below our base, some other machine pushed stale
+  // data (or newer snapshots were pruned) — that is worth shouting about.
+  if (base && latest.timestamp <= base) {
+    if (latest.timestamp < base) {
+      log.warn(
+        `the newest snapshot on the sync target is OLDER than this machine's database — not restoring.`,
+      );
+      log.sub(pc.dim(`  remote: ${latest.timestamp} (${latest.machine ?? 'unknown machine'})`));
+      log.sub(pc.dim(`  local:  ${base} (last snapshot this machine pushed or restored)`));
+      log.hint(
+        'A machine with stale data may have pushed, or newer snapshots were pruned. `envbeam pull --force` restores it anyway and discards local data.',
+      );
+      out.restoreSkipped = `remote snapshot ${latest.timestamp} is older than local base ${base}`;
+    } else {
+      log.sub('local DB already reflects the latest snapshot');
+      out.restoreSkipped = 'already at the latest snapshot';
+    }
+    if (!ctx.force) return out;
+    log.warn(`--force: restoring ${latest.name}, which is not newer than this machine's database.`);
   }
 
+  // Divergence guard (SYNC_SAFETY.md D4). A restore is a whole-database
+  // overwrite; if the local data moved since our base, the two sides diverged
+  // and no timestamp can adjudicate that. Never auto-restore over it.
+  const change = state.dbFingerprint
+    ? await active.database.hasChanged(dctx, state.dbFingerprint)
+    : null;
+
   let shouldRestore = db.restore === 'auto';
-  if (db.restore === 'prompt') {
+  if (change?.changed) {
+    log.warn(`local database has changed since the last sync — restoring ${latest.name} would discard those changes.`);
+    log.sub(pc.dim(`  ${change.detail}`));
+    if (ctx.force) {
+      log.warn('--force: discarding local database changes.');
+      shouldRestore = true;
+    } else if (!ctx.prompter.interactive) {
+      // `--yes` means "don't ask me the routine questions", not "discard data
+      // nobody else has a copy of". A divergence needs a human or --force.
+      shouldRestore = false;
+      log.hint('Refusing to resolve a database divergence non-interactively. Re-run in a terminal, or pass --force to discard the local data.');
+    } else {
+      shouldRestore = await ctx.prompter.confirm(
+        `Restore snapshot ${latest.timestamp} (${latest.machine ?? 'unknown'}) and DISCARD local database changes?`,
+        false,
+      );
+    }
+  } else if (db.restore === 'prompt') {
+    // Change detection is row-counts (or size + approximate rows): an UPDATE in
+    // place changes neither. Say so rather than implying "no changes" is proof.
+    if (change) log.sub(pc.dim('  no row-count change detected locally (updates in place are not detected)'));
     shouldRestore = await ctx.prompter.confirm(
       `Restore newer DB snapshot from ${latest.timestamp} (${latest.machine ?? 'unknown'})?`,
       true,
@@ -257,16 +308,62 @@ async function resumeDatabase(
   }
   if (!shouldRestore) {
     log.sub('snapshot restore declined; migrations applied only');
+    out.restoreSkipped = change?.changed ? 'local database has diverged' : 'declined';
     return out;
+  }
+
+  // About to overwrite data the remote has never seen — keep a copy first.
+  if (change?.changed) {
+    const backup = await preRestoreBackup(ctx, active);
+    if (backup) log.sub(pc.dim(`  local database dumped to ${backup} before restore`));
+    else log.warn('could not dump the local database before restoring — its current contents are not recoverable');
   }
 
   const restored = await downloadAndRestore(ctx, active, target, latest);
   if (restored) {
-    await patchState(ctx.workspaceRoot, { lastRestoredTimestamp: latest.timestamp });
+    // Re-baseline: the fingerprint now describes the restored data, otherwise the
+    // next push would read the restore itself as a local change.
+    const after = await active.database.hasChanged(dctx, undefined);
+    await patchState(ctx.workspaceRoot, {
+      lastRestoredTimestamp: latest.timestamp,
+      ...(after.fingerprint ? { dbFingerprint: after.fingerprint } : {}),
+    });
     out.restored = { timestamp: latest.timestamp, file: latest.name };
     log.sub(`restored snapshot from ${latest.timestamp}`);
   }
   return out;
+}
+
+/**
+ * Dump the local database before a restore overwrites it. Best-effort: a
+ * failure here is reported, never fatal — but the caller must say so, because
+ * the data is about to be unrecoverable.
+ */
+async function preRestoreBackup(
+  ctx: RunContext,
+  active: ReturnType<typeof resolveActiveProviders>,
+): Promise<string | null> {
+  try {
+    const dctx = ctx.providerCtx('database');
+    const dir = path.join(stateDir(), 'pre-restore');
+    await fs.mkdir(dir, { recursive: true });
+    const result = await active.database!.snapshot(dctx, {
+      dataOnly: ctx.config.database?.snapshot?.dataOnly ?? true,
+      compress: ctx.config.database?.snapshot?.compress ?? true,
+      includeTables: [],
+      excludeTables: [],
+      machine: machineName(),
+      timestamp: formatTimestamp(new Date()),
+    });
+    const dest = path.join(dir, path.basename(result.file));
+    await fs.rename(result.file, dest).catch(async () => {
+      await fs.copyFile(result.file, dest);
+      await fs.rm(result.file, { force: true });
+    });
+    return dest;
+  } catch {
+    return null;
+  }
 }
 
 async function downloadAndRestore(
@@ -352,7 +449,9 @@ function printResumeReport(ctx: RunContext, report: ResumeReport): void {
   if (report.database) {
     const r = report.database.restored
       ? `restored snapshot ${report.database.restored.timestamp}, `
-      : '';
+      : report.database.restoreSkipped
+        ? `no restore (${report.database.restoreSkipped}), `
+        : '';
     lines.push(`database:  ${r}migrations ${report.database.migrated ? 'applied' : 'up to date'}`);
   }
   if (report.session) lines.push(`session:   ${sessionSummary(report.session.action)}`);

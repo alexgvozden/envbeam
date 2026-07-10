@@ -20,6 +20,8 @@ export interface PullCliOptions extends GlobalCliOptions {
   project?: string;
   /** Directory to clone into (bootstrap mode). */
   dir?: string;
+  /** Override the sync-safety guards (restore over newer/changed local state). */
+  force?: boolean;
   /** Injectable command runner (tests pass a fake to avoid real network I/O). */
   runner?: CommandRunner;
 }
@@ -107,6 +109,7 @@ export async function pullCommand(opts: PullCliOptions): Promise<number> {
   return runCommand(logger, async () => {
     const ctx = await buildRunContext({
       dryRun: opts.dryRun,
+      force: opts.force,
       logger,
       prompter: makePrompter(opts),
     });
@@ -195,6 +198,7 @@ async function bootstrapPullCommand(projectName: string, opts: PullCliOptions): 
       try {
         const ctx = await buildRunContext({
           dryRun: opts.dryRun,
+          force: opts.force,
           logger,
           prompter,
         });
@@ -270,6 +274,7 @@ async function bootstrapPullCommand(projectName: string, opts: PullCliOptions): 
     try {
       const ctx = await buildRunContext({
         dryRun: opts.dryRun,
+        force: opts.force,
         logger,
         prompter,
       });

@@ -22,6 +22,7 @@ import { getGlobalStorageConfig, injectStorageEnv } from '../storage/global.js';
 export interface RunContextOptions {
   cwd?: string;
   dryRun?: boolean;
+  force?: boolean;
   runner?: CommandRunner;
   logger?: Logger;
   prompter?: Prompter;
@@ -49,6 +50,8 @@ export class RunContext {
   readonly logger: Logger;
   readonly prompter: Prompter;
   readonly dryRun: boolean;
+  /** `--force`: override the sync-safety guards. Guards log what they overrode. */
+  readonly force: boolean;
   readonly identities: ResolvedIdentities;
   /** Identity references that could not be resolved (reported, not fatal). */
   readonly identityWarnings: string[];
@@ -68,6 +71,7 @@ export class RunContext {
     logger: Logger;
     prompter: Prompter;
     dryRun: boolean;
+    force?: boolean;
     identities: ResolvedIdentities;
     identityWarnings: string[];
     env: Record<string, string>;
@@ -84,6 +88,7 @@ export class RunContext {
     this.logger = init.logger;
     this.prompter = init.prompter;
     this.dryRun = init.dryRun;
+    this.force = init.force ?? false;
     this.identities = init.identities;
     this.identityWarnings = init.identityWarnings;
     this.env = init.env;
@@ -107,6 +112,7 @@ export class RunContext {
       logger: this.logger,
       prompter: this.prompter,
       dryRun: this.dryRun,
+      force: this.force,
       config: this.config,
       identity,
       env: this.env,
@@ -194,6 +200,7 @@ export async function buildRunContext(opts: RunContextOptions = {}): Promise<Run
     logger,
     prompter,
     dryRun: opts.dryRun ?? false,
+    force: opts.force ?? false,
     identities,
     identityWarnings,
     env,

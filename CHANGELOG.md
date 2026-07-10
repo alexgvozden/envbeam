@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-07-10
+
+Phase 0 of `planning/SYNC_SAFETY.md`: the four paths where `pull` could destroy data that existed nowhere else. Each is a real, reachable bug, not a hypothetical, and each now has a regression test that fails against the previous code.
+
+### Fixed
+- **`pull` no longer restores a snapshot this machine pushed, over data changed since (D1).** `lastSnapshotTimestamp` was written on every push and then never read — only `lastRestoredTimestamp` gated the restore. So: push at T5, keep working, `pull` → `restore: auto` silently overwrote the newer local rows with your own T5 dump (and `restore: prompt` defaulted to yes). The new `snapshotBase()` in `core/state.ts` considers both timestamps, so a snapshot this machine produced can never look "newer" than this machine.
+- **`pull` warns loudly instead of restoring when the newest remote snapshot is *older* than local state.** Previously this case was indistinguishable from "up to date" and printed a dim one-liner. It now names both timestamps and the machine that pushed the stale snapshot, and points at `--force`.
+- **`pull` never auto-restores over a locally-changed database (D4).** `hasChanged()` existed but ran only on the push path. A restore is a whole-database overwrite; if local data moved since the recorded base, the two sides have genuinely diverged and no timestamp can adjudicate that. `restore: auto` is downgraded to a prompt that defaults to **no**, and the local database is dumped to `<state>/pre-restore/` before any forced overwrite. Divergence is never resolved non-interactively — `--yes` declines rather than discarding data, since `AutoPrompter.confirm` answers *yes* to every prompt regardless of its default.
+- **Session pull no longer deliberately prefers a stale archive (T1).** `claudeNative.pull` chose `candidates.find(c => c.machine !== thisMachine)` — "prefer not-mine" — so a machine holding the newest archive would restore an older one from elsewhere over its own transcripts. It now takes the newest archive, whoever pushed it.
+- **Session pull compares the archive against local activity before copying (T2).** `newestActivity()` existed and was only used to pick a config dir. An archive older than the local `.jsonl` transcripts is now refused with an explanation rather than copied over them. `safeCopySessionTree` also preserves mtimes from the archive, so a restored transcript keeps the time it was last *written* — without which this comparison is meaningless after the first pull.
+- **`restore` re-baselines the change-detection fingerprint**, so the next `push` doesn't read the restore itself as a local data change.
+
+### Added
+- **`envbeam pull --force`** — the single, explicit escape hatch for all of the above. Every guard that honors it logs what it overrode. Threaded through `RunContext.force` → `ProviderContext.force`.
+- `ResumeReport.database.restoreSkipped` records *why* an available snapshot was not restored; it appears in the run report.
+
 ## [0.18.3] - 2026-07-10
 
 ### Changed

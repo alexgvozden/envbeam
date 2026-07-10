@@ -34,6 +34,12 @@ export interface ProviderContext {
   logger: Logger;
   prompter: Prompter;
   dryRun: boolean;
+  /**
+   * The user passed `--force`: override safety guards that would otherwise
+   * refuse to overwrite state this machine has not seen. Every guard that
+   * honors this must log what it overrode.
+   */
+  force?: boolean;
   /** Full workspace config (resolved + detection-filled). */
   config: WorkspaceConfig;
   /** Resolved identity for this concern, if the config named one. */

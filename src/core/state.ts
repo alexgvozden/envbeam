@@ -13,6 +13,26 @@ export interface WorkspaceState {
   lastRestoredTimestamp?: string;
 }
 
+/**
+ * The newest snapshot this machine has already seen — whether it *pushed* that
+ * snapshot or *restored* it. Both mean "our database already reflects this",
+ * so a remote snapshot is only newer than us when it sorts above this.
+ *
+ * Consulting the push side is what stops a machine from restoring its own dump
+ * over data it has changed since (SYNC_SAFETY.md D1): `lastSnapshotTimestamp`
+ * was recorded on every push and then never read.
+ *
+ * Returns undefined when this machine has no history for the workspace, in
+ * which case any snapshot is genuinely new to it.
+ */
+export function snapshotBase(state: WorkspaceState): string | undefined {
+  const seen = [state.lastSnapshotTimestamp, state.lastRestoredTimestamp].filter(
+    (t): t is string => typeof t === 'string' && t.length > 0,
+  );
+  if (!seen.length) return undefined;
+  return seen.sort()[seen.length - 1];
+}
+
 function stateFile(workspaceRoot: string): string {
   const key = createHash('sha1').update(path.resolve(workspaceRoot)).digest('hex').slice(0, 16);
   return path.join(stateDir(), `${key}.json`);

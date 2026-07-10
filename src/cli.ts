@@ -182,8 +182,9 @@ async function main(): Promise<void> {
     .alias('resume')
     .description('Pull state and get ready to work (or bootstrap a project by name)')
     .option('--dir <path>', 'directory to clone into (bootstrap mode)')
+    .option('--force', 'restore even over newer or locally-changed state (discards it)')
     .action(async (project, opts, cmd) =>
-      exit(await pullCommand({ ...globalOpts(cmd), project, dir: opts.dir })),
+      exit(await pullCommand({ ...globalOpts(cmd), project, dir: opts.dir, force: opts.force })),
     );
 
   program

@@ -53,9 +53,15 @@ function baseRunner(over: { dirty?: string[]; psqlRows?: () => string } = {}): F
   return r;
 }
 
-async function ctxOn(root: string, runner: FakeRunner, config: object, prompter?: AutoPrompter): Promise<RunContext> {
+async function ctxOn(
+  root: string,
+  runner: FakeRunner,
+  config: object,
+  prompter?: AutoPrompter,
+  opts: { force?: boolean; logLines?: string[] } = {},
+): Promise<RunContext> {
   await fs.writeFile(path.join(root, 'docker-compose.yml'), 'services:\n  db:\n    image: postgres:16\n');
-  return makeTestContext({ config, runner, workspaceRoot: root, prompter });
+  return makeTestContext({ config, runner, workspaceRoot: root, prompter, force: opts.force, logLines: opts.logLines });
 }
 
 const snapConfig = (sync: object, over: object = {}) => ({
@@ -91,6 +97,115 @@ describe('resume edge cases', () => {
     const ctx = await ctxOn(dir, baseRunner(), snapConfig({ target: 'local-folder', path: syncDir }, { restore: 'auto' }));
     const report = await runResume(ctx);
     expect(report.database?.restored).toBeUndefined();
+  });
+
+  // SYNC_SAFETY.md §5 — lineage and divergence guards on the restore path.
+  describe('snapshot lineage (D1) and divergence (D4)', () => {
+    /** Put one snapshot on a fresh local-folder sync target. */
+    async function targetWith(timestamp: string, machine = 'desktop'): Promise<string> {
+      const syncDir = path.join(home, 'snaps');
+      await fs.mkdir(syncDir, { recursive: true });
+      await fs.writeFile(path.join(syncDir, snapshotName('keeper', timestamp, machine, 'sql')), '-- sql\n');
+      return syncDir;
+    }
+
+    it('D1: never restores a snapshot this machine pushed, even with restore: auto', async () => {
+      const { dir, cleanup } = await tmpDir();
+      cleanups.push(cleanup);
+      const syncDir = await targetWith('20260601T120000Z', 'edgebox');
+      // We pushed it. lastRestoredTimestamp is unset — the old code's only check.
+      await patchState(dir, { lastSnapshotTimestamp: '20260601T120000Z' });
+      const runner = baseRunner();
+      const report = await runResume(
+        await ctxOn(dir, runner, snapConfig({ target: 'local-folder', path: syncDir }, { restore: 'auto' })),
+      );
+      expect(report.database?.restored).toBeUndefined();
+      expect(report.database?.restoreSkipped).toBe('already at the latest snapshot');
+      expect(runner.calls.some((c) => c.command === 'psql' && c.args.includes('-f'))).toBe(false);
+    });
+
+    it('D1: alerts when the newest remote snapshot is OLDER than local state', async () => {
+      const { dir, cleanup } = await tmpDir();
+      cleanups.push(cleanup);
+      const syncDir = await targetWith('20260601T120000Z', 'laptop');
+      await patchState(dir, { lastSnapshotTimestamp: '20260605T090000Z' });
+      const lines: string[] = [];
+      const report = await runResume(
+        await ctxOn(dir, baseRunner(), snapConfig({ target: 'local-folder', path: syncDir }, { restore: 'auto' }), undefined, {
+          logLines: lines,
+        }),
+      );
+      expect(report.database?.restored).toBeUndefined();
+      expect(report.database?.restoreSkipped).toMatch(/older than local base 20260605T090000Z/);
+      const out = lines.join('\n');
+      expect(out).toMatch(/OLDER than this machine's database/);
+      expect(out).toMatch(/20260601T120000Z \(laptop\)/);
+      expect(out).toMatch(/--force/);
+    });
+
+    it('D1: --force restores a snapshot that is not newer', async () => {
+      const { dir, cleanup } = await tmpDir();
+      cleanups.push(cleanup);
+      const syncDir = await targetWith('20260601T120000Z', 'laptop');
+      await patchState(dir, { lastSnapshotTimestamp: '20260605T090000Z' });
+      const runner = baseRunner();
+      const report = await runResume(
+        await ctxOn(dir, runner, snapConfig({ target: 'local-folder', path: syncDir }, { restore: 'auto' }), undefined, {
+          force: true,
+        }),
+      );
+      expect(report.database?.restored?.timestamp).toBe('20260601T120000Z');
+    });
+
+    it('D4: a genuinely newer snapshot does not auto-restore over changed local data', async () => {
+      const { dir, cleanup } = await tmpDir();
+      cleanups.push(cleanup);
+      const syncDir = await targetWith('20260701T120000Z');
+      // Local data moved since our base: the recorded fingerprint no longer matches.
+      await patchState(dir, { lastRestoredTimestamp: '20260601T120000Z', dbFingerprint: 'stale-fingerprint' });
+      const runner = baseRunner({ psqlRows: () => '4200' });
+      const lines: string[] = [];
+      const report = await runResume(
+        await ctxOn(dir, runner, snapConfig({ target: 'local-folder', path: syncDir }, { restore: 'auto' }), undefined, {
+          logLines: lines,
+        }),
+      );
+      // restore: auto is downgraded to a prompt, which defaults to NO.
+      expect(report.database?.restored).toBeUndefined();
+      expect(report.database?.restoreSkipped).toBe('local database has diverged');
+      expect(lines.join('\n')).toMatch(/would discard those changes/);
+    });
+
+    it('D4: --force restores over changed local data, dumping it first', async () => {
+      const { dir, cleanup } = await tmpDir();
+      cleanups.push(cleanup);
+      const syncDir = await targetWith('20260701T120000Z');
+      await patchState(dir, { lastRestoredTimestamp: '20260601T120000Z', dbFingerprint: 'stale-fingerprint' });
+      const runner = baseRunner({ psqlRows: () => '4200' });
+      const lines: string[] = [];
+      const report = await runResume(
+        await ctxOn(dir, runner, snapConfig({ target: 'local-folder', path: syncDir }, { restore: 'auto' }), undefined, {
+          force: true,
+          logLines: lines,
+        }),
+      );
+      expect(report.database?.restored?.timestamp).toBe('20260701T120000Z');
+      expect(lines.join('\n')).toMatch(/dumped to .*pre-restore/);
+      const dumped = await fs.readdir(path.join(home, 'state', 'pre-restore')).catch(() => []);
+      expect(dumped.length).toBe(1);
+    });
+
+    it('D4: an unchanged local DB still restores a newer snapshot under restore: auto', async () => {
+      const { dir, cleanup } = await tmpDir();
+      cleanups.push(cleanup);
+      const syncDir = await targetWith('20260701T120000Z');
+      const runner = baseRunner({ psqlRows: () => '4200' });
+      // Baseline the fingerprint to whatever the DB currently reports.
+      const probe = await runResume(
+        await ctxOn(dir, runner, snapConfig({ target: 'local-folder', path: syncDir }, { restore: 'auto' })),
+      );
+      expect(probe.database?.restored?.timestamp).toBe('20260701T120000Z');
+    });
   });
 
   it('migrations-only mode never restores even with snapshots present', async () => {
@@ -181,8 +296,11 @@ describe('encrypted snapshot round trip (fake age)', () => {
     const files = await fs.readdir(syncDir);
     expect(files.every((f) => f.endsWith('.age'))).toBe(true);
 
-    // resume restores: download + age decrypt + psql restore (plain dump)
-    const resumeReport = await runResume(await ctxOn(dir, runner, snapConfig(sync, { restore: 'auto' })));
+    // resume restores: download + age decrypt + psql restore (plain dump).
+    // The only snapshot on the target is the one this workspace just pushed, so
+    // the D1 lineage guard would refuse it — `--force` is the documented way to
+    // restore a snapshot that is not newer than local state.
+    const resumeReport = await runResume(await ctxOn(dir, runner, snapConfig(sync, { restore: 'auto' }), undefined, { force: true }));
     expect(resumeReport.database?.restored).toBeTruthy();
     expect(runner.calls.some((c) => c.command === 'age' && c.args.includes('-d'))).toBe(true);
     expect(runner.calls.some((c) => c.command === 'psql' && c.args.includes('-f'))).toBe(true);

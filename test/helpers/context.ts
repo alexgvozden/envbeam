@@ -19,6 +19,7 @@ export interface TestContextOptions {
   runner?: CommandRunner;
   prompter?: Prompter;
   dryRun?: boolean;
+  force?: boolean;
   env?: Record<string, string>;
   identities?: ResolvedIdentities;
   identityWarnings?: string[];
@@ -48,6 +49,7 @@ export function makeTestContext(opts: TestContextOptions): RunContext {
     logger,
     prompter: opts.prompter ?? new AutoPrompter({ defaults: true }),
     dryRun: opts.dryRun ?? false,
+    force: opts.force ?? false,
     identities: opts.identities ?? {},
     identityWarnings: opts.identityWarnings ?? [],
     env: opts.env ?? {},

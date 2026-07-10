@@ -53,6 +53,18 @@ export function parseSessionFileName(name: string): ParsedSessionName | null {
   return { workspace: m[1]!, scope: m[2]!, machine: m[3]!, timestamp: m[4]! };
 }
 
+/**
+ * Milliseconds for a session-archive timestamp (`2026-07-10T12-30-00`, UTC —
+ * see {@link ClaudeNativeProvider.sessionFileName}). 0 when unparseable, which
+ * callers must treat as "unknown", never as "very old".
+ */
+export function sessionTimestampMs(timestamp: string): number {
+  const m = timestamp.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})$/);
+  if (!m) return 0;
+  const ms = Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}Z`);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 /** Newest .jsonl mtime in a directory (falls back to the dir's own mtime). */
 async function newestActivity(dir: string): Promise<number> {
   try {
@@ -95,6 +107,10 @@ function isSensitiveConfigFile(name: string): boolean {
  * Copy a restored session tree into place, treating the archive as untrusted:
  * skip symlinks entirely, and never write files that would inject hooks/MCP
  * servers/settings (which would run commands the next time Claude starts).
+ *
+ * Modification times are carried over from the archive (tar preserves them), so
+ * a restored transcript keeps the time it was last *written*, not the time it
+ * was restored. Freshness comparisons on the next pull depend on this.
  */
 async function safeCopySessionTree(srcDir: string, destDir: string, scope: string): Promise<void> {
   await ensureDir(destDir);
@@ -108,6 +124,8 @@ async function safeCopySessionTree(srcDir: string, destDir: string, scope: strin
     } else if (e.isFile()) {
       if (isSensitiveConfigFile(e.name)) continue;
       await fs.copyFile(s, d);
+      const st = await fs.stat(s).catch(() => null);
+      if (st) await fs.utimes(d, st.atime, st.mtime).catch(() => undefined);
     }
   }
 }
@@ -323,7 +341,6 @@ export class ClaudeNativeProvider implements SessionProvider {
   async pull(ctx: ProviderContext): Promise<SessionResult> {
     const scope = ctx.config.session?.scope ?? 'project';
     const workspace = ctx.config.workspace;
-    const machine = machineName();
 
     if (ctx.dryRun) {
       return { action: 'noop', detail: `would pull ${scope} session` };
@@ -332,12 +349,11 @@ export class ClaudeNativeProvider implements SessionProvider {
     const target = await this.getSyncTarget(ctx);
     if (!target) return { action: 'noop', detail: 'no sync target configured' };
 
-    // Choose the newest encrypted archive for this workspace + scope,
-    // preferring one pushed from a different machine. Uses listNames (raw
-    // prefix match) — target.list() only understands DB-snapshot filenames.
-    // Match scope via an exact filename PREFIX (workspace + scope are values we
-    // control) rather than parsing the scope out — a greedy regex mis-splits
-    // when a machine/host segment happens to contain a scope keyword.
+    // Choose the newest encrypted archive for this workspace + scope. Uses
+    // listNames (raw prefix match) — target.list() only understands DB-snapshot
+    // filenames. Match scope via an exact filename PREFIX (workspace + scope are
+    // values we control) rather than parsing the scope out — a greedy regex
+    // mis-splits when a machine/host segment happens to contain a scope keyword.
     const prefix = `claude-session-${workspace}-${scope}-`;
     const candidates = (await target.listNames(ctx, `claude-session-${workspace}`))
       .filter((e) => e.name.startsWith(prefix) && e.name.endsWith('.tar.gz.age'))
@@ -346,7 +362,30 @@ export class ClaudeNativeProvider implements SessionProvider {
     if (!candidates.length) {
       return { action: 'noop', detail: 'no session backups found' };
     }
-    const chosen = candidates.find((c) => c.parsed && c.parsed.machine !== machine) ?? candidates[0]!;
+    // Newest archive wins, whoever pushed it. Preferring one from *another*
+    // machine restored a knowingly stale archive over newer local transcripts
+    // whenever this machine held the newest one (SYNC_SAFETY.md T1). If the
+    // newest is ours and nothing changed since, the restore is a no-op — which
+    // is the correct answer, not a reason to reach for an older archive.
+    const chosen = candidates[0]!;
+
+    // Freshness guard (T2): the restore copies whole files over the local tree,
+    // so an archive older than the local transcripts would truncate them.
+    const dest = await this.resolveSessionPath(scope, ctx.workspaceRoot);
+    const archiveMs = chosen.parsed ? sessionTimestampMs(chosen.parsed.timestamp) : 0;
+    const localMs = dest.exists ? await newestActivity(dest.dir) : 0;
+    if (archiveMs && localMs > archiveMs) {
+      const detail =
+        `local Claude sessions (last written ${new Date(localMs).toISOString()}) are newer than the ` +
+        `newest backup (${chosen.parsed?.timestamp}, from ${chosen.parsed?.machine ?? 'unknown'})`;
+      if (!ctx.force) {
+        return {
+          action: 'noop',
+          detail: `${detail} — not restoring. Push from this machine, or re-run with --force to overwrite them.`,
+        };
+      }
+      ctx.logger.warn(`--force: overwriting Claude sessions that are newer than the archive (${detail}).`);
+    }
 
     const syncConfig: SyncConfig | undefined = ctx.config.session?.sync ?? ctx.config.database?.sync;
     if (!syncConfig) return { action: 'noop', detail: 'no sync target configured' };
@@ -407,7 +446,6 @@ export class ClaudeNativeProvider implements SessionProvider {
         /* metadata optional */
       }
 
-      const dest = await this.resolveSessionPath(scope, ctx.workspaceRoot);
       ctx.logger.sub(pc.dim(`restoring into ${dest.dir}`));
 
       // The archive is downloaded from remote storage and is only encrypted for
