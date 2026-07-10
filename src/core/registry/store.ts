@@ -242,9 +242,13 @@ export class RegistryStore {
         );
       }
 
+      const revision = (existing?.revision ?? 0) + 1;
       const next: ProjectEntry = projectEntrySchema.parse({
         ...entry,
-        revision: (existing?.revision ?? 0) + 1,
+        revision,
+        // The caller cannot know its revision until the CAS loop settles, and a
+        // retry may bump it again. Stamp it here so the two never disagree.
+        ...(entry.checkpoint ? { checkpoint: { ...entry.checkpoint, revision } } : {}),
       });
       registry.projects[entry.name] = next;
 

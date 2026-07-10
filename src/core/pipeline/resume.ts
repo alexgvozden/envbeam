@@ -6,6 +6,8 @@ import { resolveActiveProviders } from './providers.js';
 import { runPreflight, assertSecretsAuth, type ToolCheck } from './preflight.js';
 import { runMigrateCommand } from '../providers/database/migrate.js';
 import { machineName } from '../providers/database/base.js';
+import { gitHasCommit, gitIsAncestor } from '../providers/git/git.js';
+import type { Checkpoint } from '../registry/types.js';
 import { stateDir } from '../config/paths.js';
 import { loadState, patchState, snapshotBase } from '../state.js';
 import {
@@ -40,6 +42,8 @@ export interface ResumeReport {
     /** Why a snapshot that exists on the sync target was not restored. */
     restoreSkipped?: string;
   };
+  /** Set when the remote checkpoint could not be applied to this checkout. */
+  coherenceBlocked?: string;
 }
 
 function blockingProblems(ctx: RunContext, checks: ToolCheck[]): ToolCheck[] {
@@ -128,7 +132,13 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
     await patchState(ctx.workspaceRoot, { baseGitCommit: gstatus.commit });
   }
 
-  // 3. Secrets
+  // Coherence: can this checkout actually reach the commit the remote's data was
+  // captured against? If not, applying that checkpoint's snapshot would put new
+  // data behind old migrations — a state no machine has ever been in (§9).
+  const coherent = await checkpointReachable(ctx, report.sync?.checkpoint, gstatus.commit);
+  report.coherenceBlocked = coherent.blocked;
+
+  // 4. Secrets
   if (active.secrets) {
     log.step('Secrets');
     if (ctx.dryRun) {
@@ -147,11 +157,11 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
     }
   }
 
-  // 4. Dependencies — detect language toolchains from lockfiles, install the
+  // 5. Dependencies — detect language toolchains from lockfiles, install the
   // package manager if missing, and sync project deps (best-effort, non-fatal).
   report.deps = (await installRuntimeDeps(ctx)) ?? undefined;
 
-  // 5. Session — best-effort: never block getting the machine ready to work.
+  // 6. Session — best-effort: never block getting the machine ready to work.
   if (active.session) {
     log.step('Session');
     try {
@@ -167,7 +177,7 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
     }
   }
 
-  // 5. Container
+  // 7. Container
   if (willStartContainer) {
     log.step('Container');
     const status = await active.container!.up(ctx.providerCtx('container'));
@@ -175,7 +185,7 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
     log.sub(status.running ? 'container up' : status.detail ?? 'container not running');
   }
 
-  // 6. Database
+  // 8. Database
   if (ctx.config.database) {
     log.step('Database');
     const ambiguous = active.database?.ambiguityWarning?.(ctx.providerCtx('database'));
@@ -185,16 +195,16 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
     if (willStartContainer && active.database && !ctx.dryRun) {
       await waitForDbReady(ctx, active.database);
     }
-    report.database = await resumeDatabase(ctx, active);
+    report.database = await resumeDatabase(ctx, active, coherent);
   }
 
-  // 7. Advance the base — but only if we actually took in what the remote holds.
+  // 9. Advance the base — but only if we actually took in what the remote holds.
   // A pull that skipped the git fast-forward (dirty tree) or declined a restore
   // has NOT observed the remote checkpoint, and claiming otherwise would let the
   // next push overwrite it while believing it was up to date.
   await advanceBaseIfApplied(ctx, report);
 
-  // 8. Report
+  // 10. Report
   printResumeReport(ctx, report);
   return report;
 }
@@ -202,6 +212,14 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
 async function advanceBaseIfApplied(ctx: RunContext, report: ResumeReport): Promise<void> {
   const sync = report.sync;
   if (ctx.dryRun || !sync || sync.unavailable || sync.remoteRevision === 0) return;
+
+  if (report.coherenceBlocked) {
+    ctx.logger.warn(
+      `pull did not apply remote revision ${sync.remoteRevision} — the sync base stays at r${sync.baseRevision}.`,
+    );
+    ctx.logger.sub(pc.dim(`  ${report.coherenceBlocked}`));
+    return;
+  }
 
   const gitApplied =
     !report.git || report.git.action === 'fast-forwarded' || report.git.action === 'up-to-date';
@@ -224,6 +242,50 @@ async function advanceBaseIfApplied(ctx: RunContext, report: ResumeReport): Prom
     for (const w of why) ctx.logger.sub(pc.dim(`  ${w}`));
     ctx.logger.hint('Resolve the above and pull again; until then `push` will refuse, since this machine is behind.');
   }
+}
+
+/**
+ * What the DB step is allowed to restore, given the remote checkpoint and where
+ * git actually ended up.
+ */
+interface CheckpointVerdict {
+  /** The checkpoint we may apply, if any. */
+  checkpoint?: Checkpoint;
+  /** Set when a checkpoint exists but must not be applied; the reason why. */
+  blocked?: string;
+}
+
+/**
+ * A checkpoint says "this snapshot was taken against commit X". Restoring its
+ * data into a checkout that does not contain X means running new data under old
+ * migrations, and the app breaks in ways that look like a migration bug
+ * (SYNC_SAFETY.md §9). Commit ancestry is the one lineage question git can
+ * answer for us, so ask it (§10.4).
+ *
+ * `pull` fetches before this runs, so an unreachable commit really is one this
+ * checkout cannot see — most often because a dirty tree blocked the fast-forward.
+ */
+async function checkpointReachable(
+  ctx: RunContext,
+  checkpoint: Checkpoint | undefined,
+  head: string | undefined,
+): Promise<CheckpointVerdict> {
+  if (!checkpoint || ctx.dryRun) return { checkpoint };
+  const gctx = ctx.providerCtx('git');
+
+  if (!head) return { checkpoint, blocked: 'this checkout has no commits' };
+  if (checkpoint.gitCommit === head) return { checkpoint };
+
+  if (!(await gitHasCommit(gctx, checkpoint.gitCommit))) {
+    return { checkpoint, blocked: `commit ${checkpoint.gitCommit.slice(0, 8)} is not in this repository` };
+  }
+  if (!(await gitIsAncestor(gctx, checkpoint.gitCommit, head))) {
+    return {
+      checkpoint,
+      blocked: `HEAD does not contain ${checkpoint.gitCommit.slice(0, 8)}, the commit that data was captured against`,
+    };
+  }
+  return { checkpoint };
 }
 
 /** Poll the DB until it accepts connections (best-effort, ~45s cap). */
@@ -250,6 +312,7 @@ async function waitForDbReady(
 async function resumeDatabase(
   ctx: RunContext,
   active: ReturnType<typeof resolveActiveProviders>,
+  coherent: CheckpointVerdict,
 ): Promise<NonNullable<ResumeReport['database']>> {
   const log = ctx.logger;
   const dctx = ctx.providerCtx('database');
@@ -283,7 +346,31 @@ async function resumeDatabase(
     log.sub(`could not list snapshots: ${(e as Error).message}`);
     return out;
   }
-  const latest = entries[0];
+  // Refuse to half-apply: the checkpoint's data belongs with the checkpoint's
+  // code, and this checkout is not on it.
+  if (coherent.blocked) {
+    log.warn(`not restoring the remote database snapshot — ${coherent.blocked}.`);
+    log.hint('Commit or stash your changes and pull again, so the code and the data move together.');
+    out.restoreSkipped = `checkpoint not reachable: ${coherent.blocked}`;
+    return out;
+  }
+
+  // When a checkpoint names a snapshot, that is the only one we may restore:
+  // `entries[0]` could be a newer dump from a push whose git step never landed.
+  let latest: SnapshotEntry | undefined;
+  const named = coherent.checkpoint?.snapshotName;
+  if (named) {
+    latest = entries.find((e) => e.name === named);
+    if (!latest) {
+      log.warn(`the remote checkpoint names snapshot ${named}, which is not on the sync target — not restoring.`);
+      log.hint('It may have been pruned. Push from the machine that has the data, or restore from a backup.');
+      out.restoreSkipped = `checkpoint snapshot ${named} is missing from the sync target`;
+      return out;
+    }
+  } else {
+    latest = entries[0];
+  }
+
   if (!latest) {
     log.sub('no snapshots on sync target; schema is current via migrations');
     return out;

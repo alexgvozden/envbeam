@@ -266,6 +266,8 @@ export interface SessionStatus {
 export interface SessionResult {
   action: 'pulled' | 'pushed' | 'noop' | 'documented';
   detail?: string;
+  /** Name of the archive this push produced, for the checkpoint to name. */
+  artifact?: string;
 }
 
 export interface SessionProvider extends BaseProvider {

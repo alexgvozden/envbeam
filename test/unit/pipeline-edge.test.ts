@@ -324,6 +324,72 @@ describe('pause snapshot lineage (D2)', () => {
   });
 });
 
+// SYNC_SAFETY.md §9 — the sleeper. runPause pushes git first, then the DB, then
+// the session; each step fails independently, so a checkpoint can name data that
+// was never uploaded, or code that was never pushed.
+describe('cross-domain coherence (§9)', () => {
+  it('a snapshot skipped by the size cap makes the push incoherent', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const lines: string[] = [];
+    const report = await runPause(
+      await ctxOn(
+        dir,
+        baseRunner(),
+        snapConfig({ target: 'local-folder', path: path.join(home, 'snaps'), maxSizeMB: 0.000001 }),
+        undefined,
+        { logLines: lines },
+      ),
+      { force: false, snapshot: true, workMode: 'none' },
+    );
+    expect(report.database?.skipped).toMatch(/over size cap/);
+    expect(report.incoherent).toEqual([expect.stringMatching(/database snapshot skipped: over size cap/)]);
+    const out = lines.join('\n');
+    expect(out).toMatch(/this push is incomplete — the remote checkpoint was NOT advanced/);
+    expect(out).not.toMatch(/Safe to switch machines/);
+  });
+
+  it('a deliberately skipped snapshot keeps the push coherent', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const lines: string[] = [];
+    const report = await runPause(
+      await ctxOn(dir, baseRunner(), snapConfig({ target: 'local-folder', path: path.join(home, 'snaps') }), undefined, {
+        logLines: lines,
+      }),
+      { force: false, snapshot: false, workMode: 'none' },
+    );
+    expect(report.incoherent).toEqual([]);
+    expect(lines.join('\n')).toMatch(/Safe to switch machines/);
+  });
+
+  it('a refused upload (D2) makes the push incoherent — git is out, the data is not', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const syncDir = path.join(home, 'snaps');
+    await fs.mkdir(syncDir, { recursive: true });
+    await fs.writeFile(path.join(syncDir, snapshotName('keeper', '20260701T120000Z', 'other', 'sql')), '-- sql\n');
+    await patchState(dir, { lastRestoredTimestamp: '20260601T120000Z' });
+    const report = await runPause(
+      await ctxOn(dir, baseRunner(), snapConfig({ target: 'local-folder', path: syncDir })),
+      { force: false, snapshot: true, workMode: 'none' },
+    );
+    expect(report.incoherent.length).toBe(1);
+  });
+
+  it('a git push that did not happen makes the push incoherent', async () => {
+    const { dir, cleanup } = await tmpDir();
+    cleanups.push(cleanup);
+    const config = { ...snapConfig({ target: 'local-folder', path: path.join(home, 'snaps') }), git: { autopush: false } };
+    const report = await runPause(await ctxOn(dir, baseRunner(), config), {
+      force: false,
+      snapshot: false,
+      workMode: 'none',
+    });
+    expect(report.incoherent).toEqual([expect.stringMatching(/git was not pushed \(autopush: false\)/)]);
+  });
+});
+
 describe('pause edge cases', () => {
   it('--no-snapshot forces skip in snapshot mode', async () => {
     const { dir, cleanup } = await tmpDir();

@@ -242,3 +242,79 @@ describe('assertCanPull', () => {
     expect(lines.join('\n')).toMatch(/--force: pulling over local changes/);
   });
 });
+
+// SYNC_SAFETY.md §9 / §10.4 — pull must not restore a checkpoint's data into a
+// checkout that does not contain the commit that data was captured against.
+describe('checkpoint coherence on pull', () => {
+  const HEAD = 'b'.repeat(40);
+  const OTHER = 'c'.repeat(40);
+
+  /** A registry whose `keeper` entry carries a checkpoint. */
+  function runnerWithCheckpoint(opts: {
+    gitCommit: string;
+    snapshotName?: string;
+    /** commits `git cat-file -e` should accept. */
+    known?: string[];
+    /** ancestors of HEAD, per `git merge-base --is-ancestor`. */
+    ancestors?: string[];
+  }): FakeRunner {
+    const r = runnerWith({ remoteRevision: 5 });
+    const known = new Set(opts.known ?? [opts.gitCommit, HEAD]);
+    const ancestors = new Set(opts.ancestors ?? [opts.gitCommit, HEAD]);
+    r.on('git cat-file', (_c, a) => ({ code: known.has((a[2] ?? '').replace('^{commit}', '')) ? 0 : 1 }));
+    r.on('git merge-base', (_c, a) => ({ code: ancestors.has(a[2] ?? '') ? 0 : 1 }));
+
+    // Re-stub get-object with a checkpoint-bearing entry.
+    r.on(
+      (c, a) => c === 'aws' && a[1] === 'get-object',
+      (_c, a) => {
+        const projects = {
+          keeper: {
+            name: 'keeper',
+            gitRemote: 'git@github.com:acme/keeper.git',
+            gitBranch: 'main',
+            configSnapshot: 'version: 1\n',
+            lastPush: '2026-07-10T00:00:00Z',
+            machineId: 'other-machine',
+            revision: 5,
+            checkpoint: {
+              revision: 5,
+              gitCommit: opts.gitCommit,
+              gitBranch: 'main',
+              snapshotName: opts.snapshotName,
+              machineId: 'other-machine',
+              at: '2026-07-10T00:00:00Z',
+            },
+          },
+        };
+        writeFileSync(a[a.indexOf('--key') + 2]!, JSON.stringify({ version: 1, projects }));
+        return { stdout: '{"ETag":"\\"e1\\""}' };
+      },
+    );
+    return r;
+  }
+
+  it('carries the checkpoint through when it is an ancestor of HEAD', async () => {
+    const { ctx, root } = await ctxOn(runnerWithCheckpoint({ gitCommit: OTHER, ancestors: [OTHER] }));
+    await patchState(root, { baseRevision: 3 });
+    const s = await assertCanPull(ctx, active(ctx), false);
+    expect(s.checkpoint?.gitCommit).toBe(OTHER);
+  });
+
+  it('surfaces the checkpoint even when the commit is unknown — resume decides', async () => {
+    const { ctx, root } = await ctxOn(runnerWithCheckpoint({ gitCommit: OTHER, known: [HEAD] }));
+    await patchState(root, { baseRevision: 3 });
+    const s = await assertCanPull(ctx, active(ctx), false);
+    expect(s.checkpoint?.gitCommit).toBe(OTHER);
+    expect(s.verdict).toBe('behind');
+  });
+
+  it('names the snapshot the checkpoint allows', async () => {
+    const { ctx, root } = await ctxOn(
+      runnerWithCheckpoint({ gitCommit: OTHER, snapshotName: 'keeper__20260701T120000Z__other.sql', ancestors: [OTHER] }),
+    );
+    await patchState(root, { baseRevision: 3 });
+    const s = await assertCanPull(ctx, active(ctx), false);
+    expect(s.checkpoint?.snapshotName).toBe('keeper__20260701T120000Z__other.sql');
+  });
+});

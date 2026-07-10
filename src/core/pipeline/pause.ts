@@ -47,11 +47,41 @@ export interface PauseReport {
   database?: {
     snapshot?: { timestamp: string; file: string; sizeBytes: number };
     skipped?: string;
+    /** True when the snapshot was skipped on purpose, not because a step failed. */
+    skipIntended?: boolean;
     migrationsOnly: boolean;
   };
   secrets?: { action: string; count: number; detail?: string };
-  session?: { action: string; detail?: string };
+  session?: { action: string; detail?: string; artifact?: string };
   container?: { stopped: boolean };
+  /**
+   * Reasons this push did NOT produce a coherent checkpoint. Empty means every
+   * step it claims actually landed, and the registry may be advanced.
+   */
+  incoherent: string[];
+}
+
+/**
+ * Which steps of this push failed to land (SYNC_SAFETY.md §9).
+ *
+ * `runPause` pushes git first, then snapshots the database, then the session.
+ * Each step's failure is independent, so a snapshot that dies on the size cap
+ * leaves remote git *ahead of remote data*: the next machine pulls code that
+ * expects rows nobody uploaded, and is told everything is fine because the git
+ * step succeeded. A checkpoint may only name artifacts that really exist.
+ */
+function incoherenceReasons(report: PauseReport): string[] {
+  const reasons: string[] = [];
+  if (report.git && !report.git.pushed) {
+    reasons.push(`git was not pushed (${report.git.detail ?? 'unknown reason'})`);
+  }
+  if (report.database?.skipped && !report.database.skipIntended) {
+    reasons.push(`database snapshot skipped: ${report.database.skipped}`);
+  }
+  if (report.secrets?.action === 'skipped' && report.secrets.detail !== 'pull-only mode') {
+    reasons.push(`secrets not pushed: ${report.secrets.detail ?? 'skipped'}`);
+  }
+  return reasons;
 }
 
 /** Pause pipeline (PRD §7): flush local state outward so another machine resumes. */
@@ -65,7 +95,7 @@ export async function runPause(ctx: RunContext, opts: PauseOptions): Promise<Pau
     );
   }
   const active = resolveActiveProviders(ctx);
-  const report: PauseReport = {};
+  const report: PauseReport = { incoherent: [] };
 
   // Sync guard: the earliest point at which we can still abort cleanly. Once git
   // has pushed, refusing costs more than it saves.
@@ -118,7 +148,7 @@ export async function runPause(ctx: RunContext, opts: PauseOptions): Promise<Pau
     log.step('Session');
     try {
       const res = await active.session.push(ctx.providerCtx('session'));
-      report.session = { action: res.action, detail: res.detail };
+      report.session = { action: res.action, detail: res.detail, artifact: res.artifact };
       log.sub(res.detail ?? res.action);
     } catch (e) {
       report.session = { action: 'noop', detail: `session push failed: ${(e as Error).message}` };
@@ -167,6 +197,7 @@ export async function runPause(ctx: RunContext, opts: PauseOptions): Promise<Pau
   }
 
   // 6. Report
+  report.incoherent = incoherenceReasons(report);
   printPauseReport(ctx, report);
   return report;
 }
@@ -253,6 +284,10 @@ async function pauseDatabase(
   const dctx = ctx.providerCtx('database');
   let take = opts.snapshot === true;
   let skipReason = out.migrationsOnly ? 'migrations-only (schema carried by migrations)' : 'no data changes';
+  // A skip the user asked for (or that carries no data) keeps the push coherent.
+  // A skip forced by a missing tool, an unreadable DB, or a refused upload does
+  // not: git is already published, and the data it expects is not (§9).
+  let skipIntended = true;
 
   // Snapshotting needs the DB client tools (pg_dump/psql, mysqldump/mysql).
   // Per project rule, install them for the user rather than telling them to.
@@ -292,6 +327,7 @@ async function pauseDatabase(
       if (!change.fingerprint) {
         log.sub(pc.yellow(`skipping snapshot — ${change.detail}`));
         skipReason = change.detail ?? 'database not readable';
+        skipIntended = false; // we could not read the DB, not "nothing changed"
       } else {
         // If nothing has ever been backed up to the sync target, take an
         // initial snapshot so the data exists remotely; otherwise the data is
@@ -321,10 +357,12 @@ async function pauseDatabase(
   if (opts.snapshot === false) {
     log.sub('snapshot skipped (--no-snapshot)');
     out.skipped = 'skipped (--no-snapshot)';
+    out.skipIntended = true;
     return out;
   }
   if (!take) {
     out.skipped = skipReason;
+    out.skipIntended = skipIntended;
     return out;
   }
 
@@ -452,5 +490,18 @@ function printPauseReport(ctx: RunContext, report: PauseReport): void {
   if (report.session) lines.push(`session:   ${sessionSummary(report.session.action)}`);
   if (report.container?.stopped) lines.push('container: stopped');
   for (const l of lines) log.raw('    ' + l);
+
+  // A partial push is not a success. Say what landed, what didn't, and that the
+  // remote checkpoint was left where it was — otherwise the next machine pulls
+  // code expecting data nobody uploaded, and is told everything is fine.
+  if (report.incoherent.length && !ctx.dryRun) {
+    log.warn('this push is incomplete — the remote checkpoint was NOT advanced.');
+    if (report.git?.pushed && report.git.commit) {
+      log.sub(pc.dim(`  git pushed at ${report.git.commit.slice(0, 8)}`));
+    }
+    for (const r of report.incoherent) log.sub(pc.dim(`  ${r}`));
+    log.hint('Fix the above and push again. Other machines will not see a half-applied checkpoint.');
+    return;
+  }
   log.success(ctx.dryRun ? 'pause dry-run complete' : 'Safe to switch machines.');
 }

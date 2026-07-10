@@ -178,13 +178,21 @@ export async function pushCommand(opts: PushCliOptions): Promise<number> {
       }
     }
 
-    await runPause(ctx, {
+    const report = await runPause(ctx, {
       force,
       overwriteRemote: opts.overwriteRemote,
       snapshot,
       workMode,
       message,
     });
+
+    // A dry run must not advance the remote checkpoint.
+    if (ctx.dryRun) return 0;
+
+    // A push whose steps did not all land does not describe a moment any machine
+    // was ever in. Leave the checkpoint where it is; `runPause` already reported
+    // which step failed. Exit non-zero so a script notices (SYNC_SAFETY.md §9).
+    if (report.incoherent.length) return 1;
 
     // Register/update project in registry after successful push. Opportunistically
     // self-heal storage from Doppler (silent — no prompts on every push), so the
@@ -195,13 +203,35 @@ export async function pushCommand(opts: PushCliOptions): Promise<number> {
         const configContent = await fs.readFile(ctx.configPath, 'utf8');
         const machineId = await getMachineId();
 
+        const state = await loadState(ctx.workspaceRoot);
+        const gitBranch = resolveBranch(ctx.detection, ctx.config.git?.branch);
+
+        // The checkpoint names ONLY what this push actually uploaded. `gitCommit`
+        // is the causal anchor: a puller checks that the code it is about to
+        // restore this data into descends from the commit the data was taken
+        // against (§10.4). Without a commit there is nothing to anchor to, so no
+        // checkpoint is written — the registry entry is still refreshed.
+        const checkpoint = report.git?.commit
+          ? {
+              revision: 0, // the store assigns the real one
+              gitCommit: report.git.commit,
+              gitBranch,
+              snapshotName: report.database?.snapshot?.file,
+              sessionName: report.session?.artifact,
+              secretsHash: state.secretsBase?.hash,
+              machineId,
+              at: new Date().toISOString(),
+            }
+          : undefined;
+
         const entry: ProjectEntryInput = {
           name: ctx.config.workspace,
           gitRemote: detectedValue(ctx.detection, 'git.url') ?? '',
-          gitBranch: resolveBranch(ctx.detection, ctx.config.git?.branch),
+          gitBranch,
           configSnapshot: configContent,
           lastPush: new Date().toISOString(),
           machineId,
+          checkpoint,
           syncTarget: ctx.config.database?.sync
             ? {
                 target: ctx.config.database.sync.target,
@@ -216,7 +246,6 @@ export async function pushCommand(opts: PushCliOptions): Promise<number> {
         // pushed since, this refuses rather than overwriting their checkpoint —
         // the guard at the top of `runPause` catches that first, but the remote
         // can also move while this push is running.
-        const state = await loadState(ctx.workspaceRoot);
         const stored = await store.registerProject(
           entry,
           opts.overwriteRemote ? {} : { expectedRevision: state.baseRevision ?? 0 },

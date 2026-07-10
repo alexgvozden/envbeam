@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-07-10
+
+Phase 5 of `planning/SYNC_SAFETY.md`: the sleeper. Every earlier phase treats a domain in isolation; the worse bug is that envbeam's steps can **partially apply**, producing a state no machine was ever in.
+
+### Added
+- **A checkpoint is now the unit of sync.** `push` writes `{revision, gitCommit, gitBranch, snapshotName?, sessionName?, secretsHash?, machineId, at}` to the registry once, at the end, naming **only the artifacts that actually uploaded**. The revision is stamped by the store inside the CAS loop, so the entry and its checkpoint can never disagree about which revision they are.
+- **`pull` refuses to apply a checkpoint whose `gitCommit` it cannot reach.** `runResume` runs git → secrets → deps → session → container → database, and a dirty tree makes `git.pull()` return `skipped-dirty` while the pipeline *continues* — then restores a snapshot taken against a newer commit. Old migrations, new data; the app breaks in ways that look like a migration bug. After the git step, `gitHasCommit` + `gitIsAncestor` ask whether HEAD contains the commit the data was captured against. If not, the restore is skipped with the reason, and the sync base is not advanced.
+- **When a checkpoint names a snapshot, that is the only one `pull` may restore.** `entries[0]` could be a newer dump from a push whose git step never landed. A checkpoint naming a snapshot that is no longer on the target (pruned) refuses rather than silently restoring a different one.
+- **A partial push is reported as a failure, loudly.** `PauseReport.incoherent` lists the steps that did not land — git not pushed, a snapshot skipped by the size cap, missing client tools, an unreadable database, an upload refused by the D2 lineage check, secrets not pushed. When it is non-empty, `push` prints *"this push is incomplete — the remote checkpoint was NOT advanced"*, names what did land (`git pushed at abc12345`), does not touch the registry, and **exits 1**. A snapshot skipped on purpose (`--no-snapshot`, no data changes, migrations-only) keeps the push coherent.
+
+### Fixed
+- **`push --dry-run` no longer writes to the project registry.** It called `registerProject` unconditionally after `runPause`.
+
 ## [0.22.0] - 2026-07-10
 
 Phase 4 of `planning/SYNC_SAFETY.md`: per-domain merges. The guards in 0.21.0 stop a whole operation; this makes the operations themselves lossless, so there is far less to stop.

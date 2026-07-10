@@ -335,7 +335,7 @@ export class ClaudeNativeProvider implements SessionProvider {
       else ctx.logger.warn('could not record integrity hash in Doppler — restore cannot verify this archive');
 
       await patchState(ctx.workspaceRoot, { baseSessionName: uploadName });
-      return { action: 'pushed', detail: `${scope} session pushed (encrypted with age)` };
+      return { action: 'pushed', detail: `${scope} session pushed (encrypted with age)`, artifact: uploadName };
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     }
