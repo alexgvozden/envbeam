@@ -69,7 +69,14 @@ export interface GitStatus {
   branch: string;
   ahead: number;
   behind: number;
+  /** Everything `git status --porcelain` reports, tracked and untracked alike. */
   dirtyFiles: string[];
+  /**
+   * The `??` subset of `dirtyFiles`. Untracked files belong to no synced domain,
+   * so they are not evidence that this machine's *shared* state has moved — the
+   * distinction a divergence check depends on.
+   */
+  untrackedFiles: string[];
   hasUpstream: boolean;
   remoteUrl?: string;
   /** Full sha of HEAD. Absent on an unborn branch (no commits yet). */

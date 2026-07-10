@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { sha256File, recordArtifactHash, verifyArtifact, readManifest } from '../../src/core/sync/integrity.js';
+import { sha256File, recordArtifactHash, verifyArtifact, readManifest, artifactKind } from '../../src/core/sync/integrity.js';
 import { FakeRunner } from '../helpers/fakeRunner.js';
 import { tmpDir } from '../helpers/context.js';
 
@@ -73,6 +73,46 @@ describe('integrity manifest (Doppler-anchored hashes)', () => {
     await recordArtifactHash(runner, 'w', 'old.age', 'aaa');
     await recordArtifactHash(runner, 'w', 'new.age', 'bbb', new Set(['new.age'])); // old.age not live
     expect(await readManifest(runner, 'w')).toEqual({ 'new.age': 'bbb' });
+  });
+
+  // Found by the end-to-end run: `push` records the DB snapshot hash (pruning
+  // against live snapshots) and then the session archive hash (pruning against
+  // live session archives). Both families share one manifest secret, so an
+  // unscoped prune had the second step delete the first step's hash. Every
+  // `pull` then reported "no integrity hash on record" for the snapshot, and
+  // verified nothing.
+  describe('prune scoping across artifact families', () => {
+    it('classifies session archives and database snapshots apart', () => {
+      expect(artifactKind('claude-session-w-project-box-2026-07-10T09-00-00.tar.gz.age')).toBe('session');
+      expect(artifactKind('w__20260710T090000Z__box.sql.age')).toBe('snapshot');
+    });
+
+    it('a session push does not erase the database snapshot hash', async () => {
+      const store: { value?: string } = {};
+      const runner = dopplerRunner(store);
+      const snap = 'w__20260710T090000Z__box.sql.age';
+      const sess = 'claude-session-w-project-box-2026-07-10T09-00-00.tar.gz.age';
+
+      // Exactly what runPause does, in order.
+      await recordArtifactHash(runner, 'w', snap, 'snaphash', new Set([snap]));
+      await recordArtifactHash(runner, 'w', sess, 'sesshash', new Set([sess]));
+
+      expect(await readManifest(runner, 'w')).toEqual({ [snap]: 'snaphash', [sess]: 'sesshash' });
+    });
+
+    it('still prunes within a family', async () => {
+      const store: { value?: string } = {};
+      const runner = dopplerRunner(store);
+      const oldSnap = 'w__20260101T000000Z__box.sql.age';
+      const newSnap = 'w__20260710T090000Z__box.sql.age';
+      const sess = 'claude-session-w-project-box-2026-07-10T09-00-00.tar.gz.age';
+
+      await recordArtifactHash(runner, 'w', oldSnap, 'a');
+      await recordArtifactHash(runner, 'w', sess, 'b');
+      await recordArtifactHash(runner, 'w', newSnap, 'c', new Set([newSnap])); // oldSnap pruned away
+
+      expect(await readManifest(runner, 'w')).toEqual({ [newSnap]: 'c', [sess]: 'b' });
+    });
   });
 
   it('returns false (and does not throw) when Doppler is unavailable', async () => {

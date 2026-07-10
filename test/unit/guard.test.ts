@@ -45,12 +45,22 @@ const config = {
 };
 
 /** A runner whose registry holds `keeper` at `remoteRevision` (0 = absent). */
-function runnerWith(opts: { remoteRevision: number; dirty?: string[]; ahead?: number; dbRows?: string }): FakeRunner {
+function runnerWith(opts: {
+  remoteRevision: number;
+  /** Tracked modifications (` M path`). */
+  dirty?: string[];
+  /** Untracked files (`?? path`). */
+  untracked?: string[];
+  ahead?: number;
+  dbRows?: string;
+}): FakeRunner {
   const r = new FakeRunner({ available: ['git', 'aws', 'psql', 'pg_dump'] });
   r.on((_c, a) => a[0] === '--version', { stdout: 'v1' });
   r.on('git', {});
   r.on('git branch --show-current', { stdout: 'main\n' });
-  r.on('git status --porcelain', { stdout: (opts.dirty ?? []).map((f) => ` M ${f}`).join('\n') });
+  r.on('git status --porcelain', {
+    stdout: [...(opts.dirty ?? []).map((f) => ` M ${f}`), ...(opts.untracked ?? []).map((f) => `?? ${f}`)].join('\n'),
+  });
   r.on('git rev-parse --abbrev-ref', { stdout: 'origin/main' });
   r.on('git rev-parse HEAD', { stdout: 'b'.repeat(40) });
   r.on('git rev-list', { stdout: `0\t${opts.ahead ?? 0}` });
@@ -121,7 +131,26 @@ describe('syncStatus verdict', () => {
     await patchState(root, { baseRevision: 3 });
     const s = await syncStatus(ctx, active(ctx), { probeDatabase: false });
     expect(s.verdict).toBe('ahead');
-    expect(s.localChanges).toEqual(['1 uncommitted file(s)']);
+    expect(s.localChanges).toEqual(['1 uncommitted change(s) to tracked files']);
+  });
+
+  it('does not treat an untracked scratch file as divergence', async () => {
+    // A stray .env.local must not turn a routine pull into a refusal: it belongs
+    // to no synced domain, so it cannot have diverged from anything.
+    const { ctx, root } = await ctxOn(runnerWith({ remoteRevision: 5, untracked: ['.env.local'] }));
+    await patchState(root, { baseRevision: 3 });
+    const s = await syncStatus(ctx, active(ctx), { probeDatabase: false });
+    expect(s.verdict).toBe('behind');
+    expect(s.localChanges).toEqual([]);
+    expect(s.untracked).toEqual(['.env.local']);
+  });
+
+  it('still counts tracked edits alongside untracked files', async () => {
+    const { ctx, root } = await ctxOn(runnerWith({ remoteRevision: 5, dirty: ['src/a.ts'], untracked: ['scratch.txt'] }));
+    await patchState(root, { baseRevision: 3 });
+    const s = await syncStatus(ctx, active(ctx), { probeDatabase: false });
+    expect(s.verdict).toBe('diverged');
+    expect(s.localChanges).toEqual(['1 uncommitted change(s) to tracked files']);
   });
 
   it('behind when only the remote moved', async () => {

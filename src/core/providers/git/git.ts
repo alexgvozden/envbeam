@@ -89,10 +89,9 @@ export class GitProviderImpl implements GitProvider {
     const porcelain = await git(ctx, ['status', '--porcelain']);
     // Porcelain v1 lines are "XY <path>"; the 2-char status prefix carries
     // meaningful leading spaces, so strip exactly "XY " without trimming first.
-    const dirtyFiles = porcelain.stdout
-      .split(/\r?\n/)
-      .filter((l) => l.length > 0)
-      .map((l) => l.replace(/^.. /, ''));
+    const statusLines = porcelain.stdout.split(/\r?\n/).filter((l) => l.length > 0);
+    const dirtyFiles = statusLines.map((l) => l.replace(/^.. /, ''));
+    const untrackedFiles = statusLines.filter((l) => l.startsWith('??')).map((l) => l.slice(3));
 
     const upstream = await git(
       ctx,
@@ -121,7 +120,7 @@ export class GitProviderImpl implements GitProvider {
     const head = await git(ctx, ['rev-parse', 'HEAD'], true);
     if (head.code === 0 && /^[0-9a-f]{40}$/i.test(head.stdout.trim())) commit = head.stdout.trim();
 
-    return { branch, ahead, behind, dirtyFiles, hasUpstream, remoteUrl, commit };
+    return { branch, ahead, behind, dirtyFiles, untrackedFiles, hasUpstream, remoteUrl, commit };
   }
 
   async pull(ctx: ProviderContext): Promise<GitPullResult> {

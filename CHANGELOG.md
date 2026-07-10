@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.2] - 2026-07-10
+
+Two bugs found by running the whole thing end to end on two machines against a real remote, a real Hetzner bucket, and real Doppler — neither of which any unit test could have surfaced.
+
+### Fixed
+- **The Doppler-anchored integrity hash for database snapshots was erased on every push, so `pull` could never verify one.** The manifest is a single per-workspace Doppler secret shared by both artifact families. `push` records the snapshot hash, pruning the manifest against the live *snapshots*; the session step then records its archive hash, pruning against the live *session archives* — deleting the snapshot's entry. Whichever ran last won, and session runs last. Every `pull` therefore printed *"no integrity hash on record for this snapshot — cannot verify it was not tampered"* and restored it anyway. Pruning is now scoped to the recorded artifact's own family (`artifactKind`), so 0.16.0's tamper detection actually detects tampering. It was inert whenever session sync was enabled, which is the default.
+- **An untracked file no longer counts as divergence.** The sync guard read `git status --porcelain`, which includes `??` entries, so a stray `.env.local` made `pull` report *"this machine and the remote have BOTH changed"* and refuse. Untracked files belong to no synced domain and cannot have diverged from anything. `GitStatus.untrackedFiles` splits them out: they are reported (git still will not fast-forward over them, which can leave the checkpoint unapplied) but they no longer force a `diverged` verdict.
+
 ## [0.23.1] - 2026-07-10
 
 Answers open question **§12.2** of `planning/SYNC_SAFETY.md` by probing a real S3-compatible endpoint, and fixes what that revealed.

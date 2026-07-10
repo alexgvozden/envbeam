@@ -38,6 +38,11 @@ export interface SyncStatus {
   remoteRevision: number;
   /** Human-readable descriptions of what moved locally since the base. */
   localChanges: string[];
+  /**
+   * Untracked files. Not divergence — but git refuses to fast-forward over a
+   * dirty tree, so they can still stop a pull from applying the checkpoint.
+   */
+  untracked: string[];
   /** The remote checkpoint, when the registry has one. */
   checkpoint?: Checkpoint;
   /** Set when the registry could not be consulted at all (offline, unconfigured). */
@@ -86,12 +91,16 @@ async function detectLocalChanges(
   ctx: RunContext,
   active: Active,
   opts: { probeDatabase: boolean },
-): Promise<string[]> {
+): Promise<{ changes: string[]; untracked: string[] }> {
   const changes: string[] = [];
   const state = await loadState(ctx.workspaceRoot);
 
   const git = await active.git.status(ctx.providerCtx('git'));
-  if (git.dirtyFiles.length) changes.push(`${git.dirtyFiles.length} uncommitted file(s)`);
+  // Only *tracked* modifications count. An untracked scratch file is not state
+  // any machine shares, so it cannot have diverged from anything — treating it
+  // as divergence would turn every stray file into a refused pull.
+  const trackedEdits = git.dirtyFiles.length - git.untrackedFiles.length;
+  if (trackedEdits > 0) changes.push(`${trackedEdits} uncommitted change(s) to tracked files`);
   if (git.ahead > 0) changes.push(`${git.ahead} unpushed commit(s) on ${git.branch}`);
 
   if (opts.probeDatabase && active.database && state.dbFingerprint && !ctx.dryRun) {
@@ -101,7 +110,7 @@ async function detectLocalChanges(
 
   if (await dotenvEdited(ctx)) changes.push('local edits to the materialized .env');
 
-  return changes;
+  return { changes, untracked: git.untrackedFiles };
 }
 
 /** Compute where we stand, without deciding what to do about it. */
@@ -113,7 +122,7 @@ export async function syncStatus(
   const state = await loadState(ctx.workspaceRoot);
   const baseRevision = state.baseRevision ?? 0;
   const { entry, unavailable } = await readRemote(ctx);
-  const localChanges = await detectLocalChanges(ctx, active, opts);
+  const { changes: localChanges, untracked } = await detectLocalChanges(ctx, active, opts);
 
   if (unavailable || !entry) {
     return {
@@ -121,6 +130,7 @@ export async function syncStatus(
       baseRevision,
       remoteRevision: 0,
       localChanges,
+      untracked,
       unavailable,
     };
   }
@@ -141,6 +151,7 @@ export async function syncStatus(
     baseRevision,
     remoteRevision: entry.revision,
     localChanges,
+    untracked,
     checkpoint: entry.checkpoint,
   };
 }
@@ -171,6 +182,12 @@ function describe(ctx: RunContext, s: SyncStatus, action: 'push' | 'pull'): void
       break;
   }
   for (const c of s.localChanges) log.sub(pc.dim(`  local: ${c}`));
+  // Not divergence, but git will not fast-forward over them, so the checkpoint
+  // may go unapplied. Worth a word before that happens silently.
+  if (s.untracked.length && action === 'pull') {
+    log.sub(pc.dim(`  ${s.untracked.length} untracked file(s) — git will not fast-forward over them`));
+    for (const f of s.untracked.slice(0, 5)) log.sub(pc.dim(`    ${f}`));
+  }
   if (s.verdict === 'diverged' && s.checkpoint) {
     log.sub(pc.dim(`  remote: r${s.checkpoint.revision} pushed by ${s.checkpoint.machineId} at ${s.checkpoint.at}`));
   }

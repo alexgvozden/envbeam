@@ -46,10 +46,30 @@ export async function readManifest(
 }
 
 /**
+ * The two artifact families that share one workspace manifest. They are listed
+ * from the sync target by different calls, so each writer only ever knows which
+ * of *its own* artifacts are still live.
+ */
+export type ArtifactKind = 'snapshot' | 'session';
+
+/** Session archives are the ones with the well-known prefix; the rest are dumps. */
+export function artifactKind(name: string): ArtifactKind {
+  return name.startsWith('claude-session-') ? 'session' : 'snapshot';
+}
+
+/**
  * Record `name → hash` in the workspace manifest (read-modify-write of one
  * Doppler secret). Optionally prune entries whose artifact is no longer on the
  * sync target (pass the live names) so the manifest tracks retention. Returns
  * false if the manifest couldn't be written (e.g. Doppler unavailable).
+ *
+ * Pruning is scoped to the recorded artifact's own family. It has to be: a push
+ * records the database snapshot (pruning against the live *snapshots*) and then
+ * the session archive (pruning against the live *session archives*). An
+ * unscoped prune therefore has each step delete the other's hashes, and the
+ * second one wins — so the database snapshot's hash was erased on every push,
+ * and `verifyArtifact` could only ever answer `missing` for it. The integrity
+ * check silently verified nothing.
  */
 export async function recordArtifactHash(
   runner: CommandRunner,
@@ -61,8 +81,9 @@ export async function recordArtifactHash(
   const manifest = await readManifest(runner, workspace);
   manifest[name] = hash;
   if (liveNames) {
+    const kind = artifactKind(name);
     for (const k of Object.keys(manifest)) {
-      if (k !== name && !liveNames.has(k)) delete manifest[k];
+      if (k !== name && artifactKind(k) === kind && !liveNames.has(k)) delete manifest[k];
     }
   }
   const res = await runner.run(
