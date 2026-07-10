@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.2] - 2026-07-10
+
+### Changed
+- **README** — dropped the decorative emoji (terminal glyphs in the sample output are untouched, since that's what envbeam actually prints); scoped the pitch to switching between computers rather than cloud VMs; and corrected the secrets note — they *are* beamed, they just never land in envbeam's storage, since both machines re-materialize them from Doppler/1Password.
+
 ## [0.18.1] - 2026-07-10
 
 ### Changed

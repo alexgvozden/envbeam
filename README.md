@@ -9,7 +9,7 @@
   <img alt="local-only" src="https://img.shields.io/badge/backend-none%20(local--only)-purple">
 </p>
 
-Switching laptops or spinning up a cloud VM shouldn't mean re-cloning, re-fetching secrets, rebuilding containers, and losing your database state and AI session. `envbeam` moves **all of it** with two commands:
+Switching laptops shouldn't mean re-cloning, re-fetching secrets, rebuilding containers, and losing your database state and AI session. `envbeam` moves **all of it** with two commands:
 
 ```bash
 envbeam push     # hand off this machine
@@ -26,15 +26,15 @@ envbeam pull     # pick up where you left off on the other one
 
 | | Handled by | How it travels |
 |---|---|---|
-| 🧬 **Code** | `git` | pushed to / pulled from your git remote |
-| 🔐 **Secrets** | Doppler / 1Password | re-fetched from your provider into a gitignored `.env` — never shipped by envbeam |
-| 📦 **Container** | Dev Container / Compose | brought up on the other machine |
-| 🗄️ **Database** | `pg_dump` / `mysqldump` | age-encrypted snapshot on your sync target |
-| 🤖 **Claude session** | `claude-native` (built-in) | age-encrypted archive on your sync target |
+| **Code** | `git` | pushed to / pulled from your git remote |
+| **Secrets** | Doppler / 1Password | re-fetched from your provider into a gitignored `.env` |
+| **Container** | Dev Container / Compose | brought up on the other machine |
+| **Database** | `pg_dump` / `mysqldump` | age-encrypted snapshot on your sync target |
+| **Claude session** | `claude-native` (built-in) | age-encrypted archive on your sync target |
 
 Each concern runs under **the right account** for it (work GitHub, personal Doppler vault, …). There is **no envbeam backend** — everything flows only through infrastructure *you already own*.
 
-> Secrets aren't beamed — both machines point at the same provider, so `pull` just re-materializes them locally. Session sync is **opt-in** (off by default; enable it with `envbeam session setup`).
+> Secrets never touch envbeam storage — both machines point at the same provider, so `pull` re-materializes them straight from Doppler or 1Password. Session sync is **opt-in** (off by default; enable it with `envbeam session setup`).
 
 ---
 
@@ -44,9 +44,9 @@ Each concern runs under **the right account** for it (work GitHub, personal Dopp
 
 ```
    ┌───────────────────────────┐                        ┌───────────────────────────┐
-   │  💻  Machine A  (laptop)   │                        │  ☁️  Machine B  (cloud VM) │
+   │  Machine A  (laptop)      │                        │  Machine B  (desktop)     │
    │                           │                        │                           │
-   │     envbeam push  ────────┼───┐                ┌───┼──────── envbeam pull       │
+   │     envbeam push  ────────┼───┐                ┌───┼──────── envbeam pull      │
    └───────────────────────────┘   │                │   └───────────────────────────┘
                                    │  push      pull │
                                    ▼                 ▲
@@ -73,8 +73,6 @@ Each concern runs under **the right account** for it (work GitHub, personal Dopp
 ```bash
 npm install -g envbeam
 ```
-
-Install it **globally** — `envbeam` is a CLI you run from any project directory, not a library to depend on.
 
 Requires **Node ≥ 18**. Missing a provider CLI (`docker`, `doppler`, `pg_dump`, …)? `envbeam` **installs it for you** on demand — or run `envbeam doctor` to see the full picture first.
 
