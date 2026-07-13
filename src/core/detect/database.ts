@@ -4,13 +4,15 @@ import { findComposeFile, parseCompose, type ComposeService } from './container.
 import { findFileShallow } from './scan.js';
 import type { DetectedField } from './types.js';
 
+type EngineName = 'postgres' | 'mysql' | 'neo4j';
+
 interface EngineMatch {
-  engine: 'postgres' | 'mysql';
+  engine: EngineName;
   service?: string;
   source: string;
 }
 
-const ENGINE_IMAGE_PATTERNS: Array<{ re: RegExp; engine: 'postgres' | 'mysql' }> = [
+const ENGINE_IMAGE_PATTERNS: Array<{ re: RegExp; engine: EngineName }> = [
   { re: /(^|\/)postgres(ql)?(:|$)/i, engine: 'postgres' },
   { re: /(^|\/)postgis(:|$)/i, engine: 'postgres' },
   { re: /timescale\/timescaledb/i, engine: 'postgres' },
@@ -18,6 +20,7 @@ const ENGINE_IMAGE_PATTERNS: Array<{ re: RegExp; engine: 'postgres' | 'mysql' }>
   { re: /(^|\/)mysql(:|$)/i, engine: 'mysql' },
   { re: /(^|\/)mariadb(:|$)/i, engine: 'mysql' },
   { re: /(^|\/)percona(:|$)/i, engine: 'mysql' },
+  { re: /(^|\/)neo4j(:|$)/i, engine: 'neo4j' },
 ];
 
 function matchEngineFromCompose(service: ComposeService): EngineMatch | null {
@@ -28,6 +31,7 @@ function matchEngineFromCompose(service: ComposeService): EngineMatch | null {
   // service name heuristic when image is custom-built
   if (/postgres|^pg$|^pg-/.test(service.name)) return { engine: 'postgres', service: service.name, source: 'compose' };
   if (/mysql|mariadb/.test(service.name)) return { engine: 'mysql', service: service.name, source: 'compose' };
+  if (/neo4j|graphdb/.test(service.name)) return { engine: 'neo4j', service: service.name, source: 'compose' };
   return null;
 }
 
@@ -90,6 +94,10 @@ async function detectEngineFromConfig(root: string): Promise<EngineMatch | null>
       }
       if (/DATABASE_URL\s*=\s*["']?mysql:\/\//i.test(envText)) {
         return { engine: 'mysql', source: envFile };
+      }
+      // Neo4j: a NEO4J_URI var, or a bolt:// / neo4j:// connection URL.
+      if (/NEO4J_URI\s*=/i.test(envText) || /(DATABASE_URL|NEO4J_URL)\s*=\s*["']?(neo4j|bolt)(\+s(sc)?)?:\/\//i.test(envText)) {
+        return { engine: 'neo4j', source: envFile };
       }
     }
   }

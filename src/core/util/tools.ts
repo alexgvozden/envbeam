@@ -178,6 +178,21 @@ export const TOOLS: Record<string, ToolDef> = {
     checkArgs: ['--version'],
     url: 'https://dev.mysql.com/downloads/',
   },
+  // Neo4j client — cypher-shell talks to the server over bolt (the psql analog).
+  // Homebrew ships it standalone; on Linux it lives in Neo4j's own apt/yum repo,
+  // so the package may be absent on a stock distro — fall back to installing the
+  // full `neo4j` package (which bundles cypher-shell) if the client isn't found.
+  'cypher-shell': {
+    command: 'cypher-shell',
+    name: 'Neo4j client (cypher-shell)',
+    installCommands: {
+      win32: 'winget install Neo4j.Neo4j',
+      darwin: 'brew install cypher-shell',
+      linux: 'sudo apt-get install -y cypher-shell || sudo dnf install -y cypher-shell || sudo apt-get install -y neo4j',
+    },
+    checkArgs: ['--version'],
+    url: 'https://neo4j.com/docs/operations-manual/current/cypher-shell/',
+  },
   // ---- language package managers (project dependency sync on pull) ----
   uv: {
     command: 'uv',

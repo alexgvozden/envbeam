@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] - 2026-07-13
+
+Two policy changes that make the secure path the only path: at-rest encryption is now mandatory, and Claude session sync defaults to envbeam's own built-in provider.
+
+### Changed
+- **BREAKING — at-rest encryption is required.** `sync.encrypt` no longer accepts `none`; the enum is `age` (default) | `gpg`, and a config that still sets `encrypt: none` is rejected at load with a clear message. A snapshot is never uploaded in the clear: if no key is available (`age`) or no recipient is set (`gpg`), or the encryption tool can't be installed, `push` **stops and points at `envbeam storage setup`** instead of falling back to plaintext. On `resume`/`pull` the crypto tool is auto-installed alongside the DB client tools, so a snapshot restore no longer dead-ends at preflight.
+  - *Migration:* remove any `sync.encrypt: none` from `.envbeam.yaml` (age is the default), and run `envbeam storage setup` once to generate/store an age key if you haven't.
+- **Claude session sync now defaults to `claude-native`** — envbeam's own built-in, age-encrypted, integrity-hashed session sync — instead of the external `claude-sync` CLI (which required a separate install and failed with `ENOENT` when absent). The default applies both when `session` is omitted and when `session.provider` is unset. `claude-native` no-ops cleanly (with a setup hint) when there are no sessions or no keys, so it never blocks a push/pull. Set `session.provider: none` to opt out, or `claude-sync` to keep the old behavior.
+
+## [0.27.0] - 2026-07-13
+
+Adds a **Neo4j database provider**, so a graph database can be carried across machines the same way `postgres`/`mysql` already are — snapshot on `pause`/`push`, restore on `resume`/`pull`, with change detection and the same divergence guarantees.
+
+### Added
+- **`neo4j` database provider.** Set `database.provider: neo4j` (auto-detected from a `neo4j` compose image/service, a `NEO4J_URI`, or a `bolt://`/`neo4j://` URL). It talks to the server over bolt through `cypher-shell` — the graph analog of how the SQL providers use `psql`/`mysql`:
+  - **Snapshot** streams a logical dump over the connection via APOC (`apoc.export.cypher.all(..., {stream:true})`) into a `.cypher` (or `.cypher.gz`) file — no server-side file access needed.
+  - **Restore** empties the graph first (`MATCH (n) DETACH DELETE n` + `apoc.schema.assert`) then replays the script, so "restore this snapshot" means the graph ends up holding exactly what the snapshot holds — never appended/duplicated. `cypher-shell` aborts on the first error, so a failed restore is never mis-reported as success.
+  - **Change detection** fingerprints node + relationship counts (or exact per-label counts when `database.changeTables` pins labels).
+  - **Connection** resolves from `NEO4J_URI`/`NEO4J_URL`, `bolt://`/`neo4j://`(+`s`/`+ssc` TLS) URLs, discrete `NEO4J_*` vars, or Docker's combined `NEO4J_AUTH=user/password`. The password is passed via the `NEO4J_PASSWORD` environment variable, never in argv.
+- **Auto-install of `cypher-shell`** on the push/pull path (and `doctor`), like the other DB clients.
+- **APOC self-provisioning (confirmed first).** APOC is a server-side plugin, so when envbeam owns the Neo4j **compose** service and APOC is missing, it offers to add `NEO4J_PLUGINS=["apoc"]` to that service (a format-preserving edit of the compose file) and recreate the container — prompting before any mutating action, and warning that a recreate drops data not held in a named volume. Neo4j Aura ships APOC Core already; a self-managed server envbeam can't reach gets a precise enable instruction rather than a dead-end.
+
 ## [0.26.0] - 2026-07-10
 
 Answers open question **§12.3** of `planning/SYNC_SAFETY.md`. The doc proposed replacing the single `revision` counter with a per-domain revision map, and called that a schema change. It isn't one: the checkpoint already names one artifact per domain, so recording the checkpoint we last *observed* and comparing it field by field gives the same answer with no schema change and no migration.

@@ -136,7 +136,8 @@ describe('sync factory + crypto helpers', () => {
 
   it('computes encryption suffix and crypto tools', () => {
     expect(encryptionSuffix(syncConfigSchema.parse({ target: 'local-folder', path: '/x', encrypt: 'age' }))).toBe('.age');
-    expect(encryptionSuffix(syncConfigSchema.parse({ target: 'local-folder', path: '/x' }))).toBe('');
+    expect(encryptionSuffix(syncConfigSchema.parse({ target: 'local-folder', path: '/x' }))).toBe('.age');
+    expect(encryptionSuffix(undefined)).toBe('');
     expect(requiredCryptoTools(syncConfigSchema.parse({ target: 'local-folder', path: '/x', encrypt: 'gpg' }))).toEqual(['gpg']);
   });
 });

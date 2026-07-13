@@ -29,12 +29,12 @@ envbeam pull     # pick up where you left off on the other one
 | **Code** | `git` | pushed to / pulled from your git remote |
 | **Secrets** | Doppler / 1Password | re-fetched from your provider into a gitignored `.env` |
 | **Container** | Dev Container / Compose | brought up on the other machine |
-| **Database** | `pg_dump` / `mysqldump` | age-encrypted snapshot on your sync target |
+| **Database** | `pg_dump` / `mysqldump` / `cypher-shell`+APOC | age-encrypted snapshot on your sync target |
 | **Claude session** | `claude-native` (built-in) | age-encrypted archive on your sync target |
 
 Each concern runs under **the right account** for it (work GitHub, personal Doppler vault, …). There is **no envbeam backend** — everything flows only through infrastructure *you already own*.
 
-> Secrets never touch envbeam storage — both machines point at the same provider, so `pull` re-materializes them straight from Doppler or 1Password. Session sync is **opt-in** (off by default; enable it with `envbeam session setup`).
+> Secrets never touch envbeam storage — both machines point at the same provider, so `pull` re-materializes them straight from Doppler or 1Password. Session sync defaults to the built-in **`claude-native`** provider (age-encrypted); run `envbeam session setup` to generate keys, or set `session.provider: none` to turn it off.
 
 ---
 
@@ -210,7 +210,7 @@ Workspace: my-app  (github:work)
   secrets   24 present
   container running
   database  reachable  snapshot@2026-07-08T15-04-22Z
-  session   ready  claude-sync (workspace scope)
+  session   ready  claude-native (project scope)
 ```
 
 `doctor` checks tools/auth and shows exactly what detection could and couldn't infer:
@@ -262,8 +262,8 @@ Each concern is a swappable provider — mix and match freely (a work GitHub wit
 | **Code** | `git` | GitHub, GitLab, or any self-hosted remote · *pluggable* |
 | **Secrets** | `doppler`, `onepassword` | materialized to a gitignored `.env` or a `run-wrapper` script; `pull-only` or `two-way` · *pluggable* |
 | **Container** | `devcontainer`, `compose`, `none` | brought up on `pull` · *pluggable* |
-| **Database** | `postgres`, `mysql` | `migrations-only` (default) or `snapshot` mode · *pluggable* |
-| **Claude session** | `claude-native`, `claude-sync`, `remote-control`, `none` | default `none` (opt-in) · *pluggable* — see below |
+| **Database** | `postgres`, `mysql`, `neo4j` | `migrations-only` (default) or `snapshot` mode · *pluggable* |
+| **Claude session** | `claude-native`, `claude-sync`, `remote-control`, `none` | default `claude-native` (built-in, age-encrypted) · *pluggable* — see below |
 
 Session providers differ in what they actually do:
 
@@ -279,7 +279,7 @@ Storage & encryption (configured, not pluggable):
 | | Options |
 |---|---|
 | **Sync target** (DB snapshots + sessions) | `local-folder`, `syncthing`, `s3` |
-| **At-rest encryption** | `age` (default for snapshots once keys exist; **always** used for sessions) · `gpg` (snapshots only, with an explicit recipient) |
+| **At-rest encryption** | **Required.** `age` (default) · `gpg` (with an explicit recipient). Snapshots and sessions are never uploaded in the clear; run `envbeam storage setup` to generate keys. |
 | **Cross-machine registry** | `s3` only |
 
 **S3 works with any S3-compatible provider** — the setup wizard asks which and pre-fills the endpoint & region:

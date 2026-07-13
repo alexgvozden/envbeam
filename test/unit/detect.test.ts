@@ -139,6 +139,19 @@ describe('database detection', () => {
     expect(detectedValue(report, 'database.provider')).toBe('mysql');
   });
 
+  it('maps a neo4j image to the neo4j provider+service', async () => {
+    const dir = await fixture({ 'docker-compose.yml': 'services:\n  graph:\n    image: neo4j:5\n' });
+    const report = await detectWorkspace(dir);
+    expect(detectedValue(report, 'database.provider')).toBe('neo4j');
+    expect(detectedValue(report, 'database.service')).toBe('graph');
+  });
+
+  it('detects neo4j from a NEO4J_URI in .env when no compose service exists', async () => {
+    const dir = await fixture({ '.env': 'NEO4J_URI=neo4j://localhost:7687\nNEO4J_PASSWORD=x\n' });
+    const report = await detectWorkspace(dir);
+    expect(detectedValue(report, 'database.provider')).toBe('neo4j');
+  });
+
   it('flags multiple db services as ambiguous', async () => {
     const dir = await fixture({
       'docker-compose.yml': 'services:\n  pg:\n    image: postgres:16\n  my:\n    image: mysql:8\n',

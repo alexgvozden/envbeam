@@ -15,8 +15,8 @@ Working notes for continuing development across machines. If you just want to *u
 ### Done
 - Two pipelines (`resume`/`pull`, `pause`/`push`) + `status`, all `--dry-run` capable.
 - Commands: `init`, `resume`, `pause`, `status`, `doctor`, `identity add/list/test/remove`, `config validate/explain/sync`, `storage setup/status`, `session setup/status`, `list`, `pull <project>`, `delete <project>`.
-- Providers (all behind swappable interfaces, plugin-loadable): git, doppler, onepassword, devcontainer, compose, postgres, mysql, claude-native, claude-sync, remote-control, none.
-- Sync targets: local-folder, syncthing, s3. Snapshots are age-encrypted by default once keys exist (gpg optional); sessions are always age-encrypted.
+- Providers (all behind swappable interfaces, plugin-loadable): git, doppler, onepassword, devcontainer, compose, postgres, mysql, neo4j, claude-native, claude-sync, remote-control, none.
+- Sync targets: local-folder, syncthing, s3. **At-rest encryption is required** (age default, gpg optional): snapshots and sessions are never uploaded in the clear — `push` refuses and points at `envbeam storage setup` if no key is available.
 - **Doppler-anchored integrity hashes (v0.16.0):** every pushed artifact (encrypted DB snapshot, encrypted session archive, session metadata) records a `sha256` in a per-workspace manifest secret in the `envbeam-global` Doppler project. `pull`/`resume` verify before decrypt/restore and refuse on mismatch, so a tampered or rolled-back bucket object is detectable without Doppler write access.
 - Detect-first config (zod schema + published JSON Schema), global identities, OS-keychain/file credential store.
 - Cross-machine project registry in S3 (v0.9.0); `envbeam storage setup` is provider-agnostic (R2/Hetzner/Backblaze/AWS/any S3) with reuse of existing Doppler `ENVBEAM_S3_*` settings, mirrored as an import offer in `envbeam init` (v0.10.0).
@@ -92,11 +92,11 @@ Everything else (doppler, op, mysql, aws, age/gpg, claude-sync) is exercised thr
 (From PRD §13 open questions — see [planning/BUILD_PLAN.md](planning/BUILD_PLAN.md) for the full list.)
 
 - Secrets v1: **both** Doppler and 1Password ship; default `doppler`.
-- Session v1: `claude-native` (built-in, age-encrypted, integrity-hashed) + `claude-sync` (delegates to the external CLI) + `remote-control` (docs/link) + `none`. Default is `none` (opt-in via `envbeam session setup`).
+- Session v1: `claude-native` (built-in, age-encrypted, integrity-hashed) + `claude-sync` (delegates to the external CLI) + `remote-control` (docs/link) + `none`. **Default is `claude-native`** — our own implementation, no external binary; it no-ops cleanly when there are no sessions or no keys (guides to `envbeam session setup`). (Was `none`/`claude-sync` before v0.28.0.)
 - Pause WIP: offer `--commit` or `--stash`; never auto-scratch-branch; refuse to lose work without `--force`.
 - Container on pause: leave running (`stopOnPause: false`).
 - Change-detection: prompt by default; `restore: auto` for non-interactive.
-- Sync target v1: `local-folder` (default/test-friendly), `syncthing`, `s3`; optional age/gpg encryption.
+- Sync target v1: `local-folder` (default/test-friendly), `syncthing`, `s3`; **required** age/gpg encryption (age default; `encrypt: none` is no longer accepted).
 - Big DBs: full dump/restore for v1 (size cap warns/aborts).
 - Identity storage: global config for non-secret refs + OS keychain (fallback 0600 file) for tokens.
 - `resume all`: deferred to post-MVP.
@@ -111,6 +111,7 @@ Everything else (doppler, op, mysql, aws, age/gpg, claude-sync) is exercised thr
 - **`allowFailure` absorbs spawn `ENOENT`** (`core/util/exec.ts`) so best-effort steps (e.g. session sync) tolerate a missing binary instead of crashing.
 - **git porcelain:** strip the 2-char `XY ` status prefix without trimming first, or paths get mangled. Handle unborn/detached HEAD via `git branch --show-current` → `symbolic-ref` → `HEAD`.
 - **Preflight does not block on DB connectivity** — the DB server may only come up during the container step. Only a *missing dump tool in snapshot mode* blocks resume.
+- **Neo4j is not SQL** — `Neo4jProvider` implements `DatabaseProvider` directly (not `SqlDatabaseProvider`) and dumps/restores over bolt via `cypher-shell`+APOC. Gotchas: it **requires the APOC server plugin** (auto-enabled for compose-owned containers with consent, else guided); restore does `MATCH (n) DETACH DELETE n` first so it *replaces* rather than appends; the password goes through `NEO4J_PASSWORD` env, never argv; and `bolt+s://`/`neo4j+ssc://` TLS scheme suffixes must survive URL normalization (`connection.ts` special-cases them — don't strip like a SQLAlchemy `+driver`). The `extractCypherStatements` parser's real-output shape is pinned by `test/integration/neo4j.integration.test.ts`.
 
 ---
 

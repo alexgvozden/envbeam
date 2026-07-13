@@ -145,7 +145,7 @@
           "properties": {
             "provider": {
               "type": "string",
-              "description": "Database plugin name: postgres | mysql."
+              "description": "Database plugin name: postgres | mysql | neo4j."
             },
             "mode": {
               "type": "string",
@@ -189,7 +189,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "Tables watched for change-detection (defaults to snapshot include set)."
+              "description": "Tables (or Neo4j labels) watched for change-detection (defaults to snapshot include set)."
             },
             "snapshot": {
               "type": "object",
@@ -267,12 +267,11 @@
                 "encrypt": {
                   "type": "string",
                   "enum": [
-                    "none",
                     "age",
                     "gpg"
                   ],
-                  "default": "none",
-                  "description": "At-rest encryption of snapshot files."
+                  "default": "age",
+                  "description": "At-rest encryption of snapshot files — required. age (default) or gpg; set up keys with `envbeam storage setup`."
                 },
                 "recipient": {
                   "type": "string",
@@ -310,8 +309,8 @@
                 "remote-control",
                 "none"
               ],
-              "default": "none",
-              "description": "Session sync provider: claude-native (built-in), claude-sync (external CLI), or none."
+              "default": "claude-native",
+              "description": "Session sync provider: claude-native (built-in, default), claude-sync (external CLI), remote-control, or none."
             },
             "scope": {
               "type": "string",
@@ -359,12 +358,11 @@
                 "encrypt": {
                   "type": "string",
                   "enum": [
-                    "none",
                     "age",
                     "gpg"
                   ],
-                  "default": "none",
-                  "description": "At-rest encryption of snapshot files."
+                  "default": "age",
+                  "description": "At-rest encryption of snapshot files — required. age (default) or gpg; set up keys with `envbeam storage setup`."
                 },
                 "recipient": {
                   "type": "string",
