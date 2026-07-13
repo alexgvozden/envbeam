@@ -11,7 +11,7 @@ export interface DbConnectionParts {
   sourceKey?: string;
 }
 
-export type DbEngine = 'postgres' | 'mysql';
+export type DbEngine = 'postgres' | 'mysql' | 'neo4j';
 
 export interface DbUrlHit {
   key: string;
@@ -33,27 +33,41 @@ export function findDatabaseUrls(env: Record<string, string | undefined>): DbUrl
       ? 'postgres'
       : SCHEME_BY_ENGINE.mysql.test(val)
         ? 'mysql'
-        : null;
+        : SCHEME_BY_ENGINE.neo4j.test(val)
+          ? 'neo4j'
+          : null;
     if (engine) hits.push({ key, engine, redacted: parseDbUrl(val).host ? `${engine}://…@${parseDbUrl(val).host}${parseDbUrl(val).database ? '/' + parseDbUrl(val).database : ''}` : engine });
   }
   return hits;
 }
 
-const URL_KEYS_BY_ENGINE: Record<'postgres' | 'mysql', string[]> = {
+const URL_KEYS_BY_ENGINE: Record<DbEngine, string[]> = {
   postgres: ['DATABASE_URL', 'POSTGRES_URL', 'POSTGRESQL_URL', 'PG_URL', 'DB_URL'],
   mysql: ['DATABASE_URL', 'MYSQL_URL', 'DB_URL'],
+  neo4j: ['NEO4J_URI', 'NEO4J_URL', 'NEO4J_BOLT_URL', 'DATABASE_URL', 'DB_URL'],
 };
 
 // Accept SQLAlchemy / driver-qualified schemes too, e.g. postgresql+psycopg://,
-// postgresql+asyncpg://, mysql+pymysql://.
-const SCHEME_BY_ENGINE: Record<'postgres' | 'mysql', RegExp> = {
+// postgresql+asyncpg://, mysql+pymysql://. Neo4j drivers use bolt:// and neo4j://
+// with optional +s (TLS) / +ssc (self-signed) routing suffixes.
+const SCHEME_BY_ENGINE: Record<DbEngine, RegExp> = {
   postgres: /^postgres(ql)?(\+[a-z0-9_]+)?:\/\//i,
   mysql: /^mysql(\+[a-z0-9_]+)?:\/\//i,
+  neo4j: /^(neo4j|bolt)(\+s(sc)?)?:\/\//i,
 };
 
-/** Strip a `+driver` qualifier so CLI clients (psql/mysql) accept the URL. */
+/**
+ * Strip a `+driver` qualifier so CLI clients (psql/mysql) accept the URL —
+ * e.g. `postgresql+psycopg://` → `postgresql://`. Neo4j is the exception:
+ * `bolt+s://` / `neo4j+ssc://` are TLS routing schemes cypher-shell needs
+ * verbatim, so they are left intact.
+ */
 function normalizeScheme(url: string): string {
-  return url.trim().replace(/^([a-z][a-z0-9.-]*)\+[a-z0-9_]+:\/\//i, '$1://');
+  return url
+    .trim()
+    .replace(/^([a-z][a-z0-9.-]*)\+[a-z0-9_]+:\/\//i, (m, base: string) =>
+      /^(neo4j|bolt)$/i.test(base) ? m : `${base}://`,
+    );
 }
 
 // scheme://[user[:password]@]host[:port][/database][?query]
@@ -94,7 +108,7 @@ export function parseDbUrl(url: string): DbConnectionParts {
  */
 export function resolveConnection(
   ctx: ProviderContext,
-  engine: 'postgres' | 'mysql',
+  engine: DbEngine,
   partKeys: {
     host: string[];
     port: string[];

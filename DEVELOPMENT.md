@@ -15,7 +15,7 @@ Working notes for continuing development across machines. If you just want to *u
 ### Done
 - Two pipelines (`resume`/`pull`, `pause`/`push`) + `status`, all `--dry-run` capable.
 - Commands: `init`, `resume`, `pause`, `status`, `doctor`, `identity add/list/test/remove`, `config validate/explain/sync`, `storage setup/status`, `session setup/status`, `list`, `pull <project>`, `delete <project>`.
-- Providers (all behind swappable interfaces, plugin-loadable): git, doppler, onepassword, devcontainer, compose, postgres, mysql, claude-native, claude-sync, remote-control, none.
+- Providers (all behind swappable interfaces, plugin-loadable): git, doppler, onepassword, devcontainer, compose, postgres, mysql, neo4j, claude-native, claude-sync, remote-control, none.
 - Sync targets: local-folder, syncthing, s3. Snapshots are age-encrypted by default once keys exist (gpg optional); sessions are always age-encrypted.
 - **Doppler-anchored integrity hashes (v0.16.0):** every pushed artifact (encrypted DB snapshot, encrypted session archive, session metadata) records a `sha256` in a per-workspace manifest secret in the `envbeam-global` Doppler project. `pull`/`resume` verify before decrypt/restore and refuse on mismatch, so a tampered or rolled-back bucket object is detectable without Doppler write access.
 - Detect-first config (zod schema + published JSON Schema), global identities, OS-keychain/file credential store.
@@ -111,6 +111,7 @@ Everything else (doppler, op, mysql, aws, age/gpg, claude-sync) is exercised thr
 - **`allowFailure` absorbs spawn `ENOENT`** (`core/util/exec.ts`) so best-effort steps (e.g. session sync) tolerate a missing binary instead of crashing.
 - **git porcelain:** strip the 2-char `XY ` status prefix without trimming first, or paths get mangled. Handle unborn/detached HEAD via `git branch --show-current` → `symbolic-ref` → `HEAD`.
 - **Preflight does not block on DB connectivity** — the DB server may only come up during the container step. Only a *missing dump tool in snapshot mode* blocks resume.
+- **Neo4j is not SQL** — `Neo4jProvider` implements `DatabaseProvider` directly (not `SqlDatabaseProvider`) and dumps/restores over bolt via `cypher-shell`+APOC. Gotchas: it **requires the APOC server plugin** (auto-enabled for compose-owned containers with consent, else guided); restore does `MATCH (n) DETACH DELETE n` first so it *replaces* rather than appends; the password goes through `NEO4J_PASSWORD` env, never argv; and `bolt+s://`/`neo4j+ssc://` TLS scheme suffixes must survive URL normalization (`connection.ts` special-cases them — don't strip like a SQLAlchemy `+driver`). The `extractCypherStatements` parser's real-output shape is pinned by `test/integration/neo4j.integration.test.ts`.
 
 ---
 

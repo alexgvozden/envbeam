@@ -118,7 +118,7 @@ export const syncConfigSchema = z
 
 export const databaseConfigSchema = z
   .object({
-    provider: z.string().optional().describe('Database plugin name: postgres | mysql.'),
+    provider: z.string().optional().describe('Database plugin name: postgres | mysql | neo4j.'),
     mode: z
       .enum(['migrations-only', 'snapshot'])
       .default('migrations-only')
@@ -140,7 +140,7 @@ export const databaseConfigSchema = z
     changeTables: z
       .array(z.string())
       .optional()
-      .describe('Tables watched for change-detection (defaults to snapshot include set).'),
+      .describe('Tables (or Neo4j labels) watched for change-detection (defaults to snapshot include set).'),
     snapshot: snapshotConfigSchema.optional(),
     sync: syncConfigSchema.optional(),
   })

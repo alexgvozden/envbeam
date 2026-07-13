@@ -145,7 +145,7 @@
           "properties": {
             "provider": {
               "type": "string",
-              "description": "Database plugin name: postgres | mysql."
+              "description": "Database plugin name: postgres | mysql | neo4j."
             },
             "mode": {
               "type": "string",
@@ -189,7 +189,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "Tables watched for change-detection (defaults to snapshot include set)."
+              "description": "Tables (or Neo4j labels) watched for change-detection (defaults to snapshot include set)."
             },
             "snapshot": {
               "type": "object",

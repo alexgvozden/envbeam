@@ -29,7 +29,7 @@ envbeam pull     # pick up where you left off on the other one
 | **Code** | `git` | pushed to / pulled from your git remote |
 | **Secrets** | Doppler / 1Password | re-fetched from your provider into a gitignored `.env` |
 | **Container** | Dev Container / Compose | brought up on the other machine |
-| **Database** | `pg_dump` / `mysqldump` | age-encrypted snapshot on your sync target |
+| **Database** | `pg_dump` / `mysqldump` / `cypher-shell`+APOC | age-encrypted snapshot on your sync target |
 | **Claude session** | `claude-native` (built-in) | age-encrypted archive on your sync target |
 
 Each concern runs under **the right account** for it (work GitHub, personal Doppler vault, …). There is **no envbeam backend** — everything flows only through infrastructure *you already own*.
@@ -262,7 +262,7 @@ Each concern is a swappable provider — mix and match freely (a work GitHub wit
 | **Code** | `git` | GitHub, GitLab, or any self-hosted remote · *pluggable* |
 | **Secrets** | `doppler`, `onepassword` | materialized to a gitignored `.env` or a `run-wrapper` script; `pull-only` or `two-way` · *pluggable* |
 | **Container** | `devcontainer`, `compose`, `none` | brought up on `pull` · *pluggable* |
-| **Database** | `postgres`, `mysql` | `migrations-only` (default) or `snapshot` mode · *pluggable* |
+| **Database** | `postgres`, `mysql`, `neo4j` | `migrations-only` (default) or `snapshot` mode · *pluggable* |
 | **Claude session** | `claude-native`, `claude-sync`, `remote-control`, `none` | default `none` (opt-in) · *pluggable* — see below |
 
 Session providers differ in what they actually do:
