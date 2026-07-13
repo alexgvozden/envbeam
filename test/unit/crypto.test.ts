@@ -49,7 +49,9 @@ describe('crypto helpers', () => {
   it('computes suffix and required tools', () => {
     expect(encryptionSuffix(ageCfg())).toBe('.age');
     expect(encryptionSuffix(gpgCfg())).toBe('.gpg');
-    expect(encryptionSuffix(syncConfigSchema.parse({ target: 'local-folder', path: '/x' }))).toBe('');
+    // encryption is required — a parsed sync config always defaults to age.
+    expect(encryptionSuffix(syncConfigSchema.parse({ target: 'local-folder', path: '/x' }))).toBe('.age');
+    expect(encryptionSuffix(undefined)).toBe('');
     expect(requiredCryptoTools(ageCfg())).toEqual(['age']);
     expect(requiredCryptoTools(undefined)).toEqual([]);
   });

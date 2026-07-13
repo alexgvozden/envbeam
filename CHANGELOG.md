@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] - 2026-07-13
+
+Two policy changes that make the secure path the only path: at-rest encryption is now mandatory, and Claude session sync defaults to envbeam's own built-in provider.
+
+### Changed
+- **BREAKING — at-rest encryption is required.** `sync.encrypt` no longer accepts `none`; the enum is `age` (default) | `gpg`, and a config that still sets `encrypt: none` is rejected at load with a clear message. A snapshot is never uploaded in the clear: if no key is available (`age`) or no recipient is set (`gpg`), or the encryption tool can't be installed, `push` **stops and points at `envbeam storage setup`** instead of falling back to plaintext. On `resume`/`pull` the crypto tool is auto-installed alongside the DB client tools, so a snapshot restore no longer dead-ends at preflight.
+  - *Migration:* remove any `sync.encrypt: none` from `.envbeam.yaml` (age is the default), and run `envbeam storage setup` once to generate/store an age key if you haven't.
+- **Claude session sync now defaults to `claude-native`** — envbeam's own built-in, age-encrypted, integrity-hashed session sync — instead of the external `claude-sync` CLI (which required a separate install and failed with `ENOENT` when absent). The default applies both when `session` is omitted and when `session.provider` is unset. `claude-native` no-ops cleanly (with a setup hint) when there are no sessions or no keys, so it never blocks a push/pull. Set `session.provider: none` to opt out, or `claude-sync` to keep the old behavior.
+
 ## [0.27.0] - 2026-07-13
 
 Adds a **Neo4j database provider**, so a graph database can be carried across machines the same way `postgres`/`mysql` already are — snapshot on `pause`/`push`, restore on `resume`/`pull`, with change detection and the same divergence guarantees.

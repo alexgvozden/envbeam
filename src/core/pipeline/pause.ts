@@ -16,7 +16,7 @@ import {
   sha256File,
   type SnapshotEntry,
 } from '../sync/index.js';
-import { PreflightError } from '../util/errors.js';
+import { PreflightError, EnvbeamError } from '../util/errors.js';
 import { assertCanPush, type SyncStatus } from './guard.js';
 import { assertSecretsAuth } from './preflight.js';
 import { detectedValue, resolveBranch } from '../detect/types.js';
@@ -413,40 +413,46 @@ async function pauseDatabase(
     return out;
   }
 
-  // Encrypt at rest. Snapshots carry the whole database, so — like sessions —
-  // default to age encryption when keys are available (secure by default);
-  // honor an explicit sync.encrypt otherwise.
+  // Encrypt at rest — REQUIRED. A snapshot carries the whole database, so
+  // envbeam never uploads it in the clear: if encryption can't be performed it
+  // stops and points at the setup guide rather than falling back to plaintext.
   const target = createSyncTarget(db.sync, ctx.identities.sync);
-  let cryptoCfg = db.sync;
-  if (!cryptoCfg.encrypt || cryptoCfg.encrypt === 'none') {
-    const keys = await ensureAgeKeys(dctx);
-    if (keys.pub) cryptoCfg = { ...cryptoCfg, encrypt: 'age' };
-  } else if (cryptoCfg.encrypt === 'age') {
-    await ensureAgeKeys(dctx);
-  }
+  const cryptoCfg = db.sync; // schema guarantees encrypt is 'age' | 'gpg'
+  const tool = cryptoCfg.encrypt === 'gpg' ? 'gpg' : 'age';
 
   const suffix = encryptionSuffix(cryptoCfg);
-  let uploadFile = result.file;
-  let uploadName = path.basename(result.file);
+  const uploadFile = result.file + suffix;
+  const uploadName = path.basename(result.file) + suffix;
   let encryptedFile: string | null = null;
   // The plaintext dump (and any encrypted copy) must never survive an error —
   // wrap encrypt+upload so a failure can't leave a full DB dump in the temp dir.
   try {
-    if (suffix) {
-      const tool = cryptoCfg.encrypt === 'gpg' ? 'gpg' : 'age';
-      const t = await ensureTools([tool], dctx.runner, dctx.logger, dctx.prompter);
-      if (t.allInstalled) {
-        uploadFile = result.file + suffix;
-        uploadName += suffix;
-        encryptedFile = uploadFile;
-        await encryptFile(dctx, cryptoCfg, result.file, uploadFile);
-        log.sub(`snapshot encrypted (${cryptoCfg.encrypt})`);
-      } else {
-        log.warn(`${tool} unavailable — snapshot stored UNENCRYPTED`);
+    // Make sure we can actually encrypt before uploading anything.
+    if (cryptoCfg.encrypt === 'age') {
+      const keys = await ensureAgeKeys(dctx);
+      if (!keys.pub && !cryptoCfg.recipient) {
+        throw new EnvbeamError('at-rest encryption is required, but no age key is set up on this machine.', {
+          exitCode: 2,
+          hint: 'Run `envbeam storage setup` to generate and store an encryption key, then push again.',
+        });
       }
-    } else {
-      log.warn('snapshot stored UNENCRYPTED — run `envbeam session setup` to generate age keys for at-rest encryption');
+    } else if (!cryptoCfg.recipient) {
+      throw new EnvbeamError('at-rest encryption is required: sync.encrypt gpg needs sync.recipient (a key id/email).', {
+        exitCode: 2,
+        hint: 'Set sync.recipient in .envbeam.yaml to your gpg key id, then push again.',
+      });
     }
+    const t = await ensureTools([tool], dctx.runner, dctx.logger, dctx.prompter);
+    if (!t.allInstalled) {
+      throw new EnvbeamError(`snapshot encryption needs ${tool}, which is not installed.`, {
+        exitCode: 2,
+        hint: `Install ${tool} (envbeam can do this for you) and push again — the snapshot is never uploaded unencrypted.`,
+      });
+    }
+
+    encryptedFile = uploadFile;
+    await encryptFile(dctx, cryptoCfg, result.file, uploadFile);
+    log.sub(`snapshot encrypted (${cryptoCfg.encrypt})`);
 
     const entry = await target.put(dctx, uploadFile, uploadName);
     const pruned = await target.prune(dctx, ctx.config.workspace, db.sync.keep ?? 5);

@@ -39,11 +39,11 @@ export const FIELD_DOCS: Record<string, string> = {
   'database.sync.bucket': 'S3 bucket name.',
   'database.sync.prefix': 'Key/path prefix within the bucket or folder.',
   'database.sync.region': 'S3 region.',
-  'database.sync.encrypt': 'At-rest encryption of snapshots: none | age | gpg.',
+  'database.sync.encrypt': 'At-rest encryption of snapshots (required): age (default) | gpg.',
   'database.sync.recipient': 'age/gpg recipient (public key / key id) when encrypting.',
   'database.sync.maxSizeMB': 'Warn/abort when a dump exceeds this size.',
   'database.sync.keep': 'Retain the N most recent snapshots.',
-  'session.provider': 'Session sync: claude-sync | remote-control | none.',
+  'session.provider': 'Session sync: claude-native (built-in, default) | claude-sync | remote-control | none.',
   'session.scope': 'sessions (just session history) | full.',
   'session.remotePath': 'Remote project path mapping for cross-machine path translation.',
 };

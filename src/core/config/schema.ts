@@ -107,9 +107,9 @@ export const syncConfigSchema = z
     prefix: z.string().optional().describe('Key prefix within the bucket/folder.'),
     region: z.string().optional().describe('S3 region (s3 target).'),
     encrypt: z
-      .enum(['none', 'age', 'gpg'])
-      .default('none')
-      .describe('At-rest encryption of snapshot files.'),
+      .enum(['age', 'gpg'])
+      .default('age')
+      .describe('At-rest encryption of snapshot files — required. age (default) or gpg; set up keys with `envbeam storage setup`.'),
     recipient: z.string().optional().describe('age/gpg recipient (public key / key id).'),
     maxSizeMB: z.number().positive().default(500).describe('Warn/abort above this dump size.'),
     keep: z.number().int().positive().default(5).describe('Retain N most recent snapshots.'),
@@ -150,8 +150,8 @@ export const sessionConfigSchema = z
   .object({
     provider: z
       .enum(['claude-native', 'claude-sync', 'remote-control', 'none'])
-      .default('none')
-      .describe('Session sync provider: claude-native (built-in), claude-sync (external CLI), or none.'),
+      .default('claude-native')
+      .describe('Session sync provider: claude-native (built-in, default), claude-sync (external CLI), remote-control, or none.'),
     /** What to sync. */
     scope: z
       .enum(['project', 'workspace', 'global'])

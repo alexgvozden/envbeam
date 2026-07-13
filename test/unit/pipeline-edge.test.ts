@@ -19,16 +19,29 @@ beforeEach(async () => {
   home = t.dir;
   process.env.ENVBEAM_HOME = home;
   process.env.ENVBEAM_MACHINE = 'edgebox';
+  // At-rest encryption is required, so snapshot push/restore always needs age
+  // keys; provide test keys so the mandatory-encryption path is exercised.
+  process.env.ENVBEAM_AGE_PUBLIC_KEY = 'age1testpub';
+  process.env.ENVBEAM_AGE_PRIVATE_KEY = 'AGE-SECRET-KEY-test';
   cleanups.push(t.cleanup);
 });
 afterEach(async () => {
   delete process.env.ENVBEAM_HOME;
   delete process.env.ENVBEAM_MACHINE;
+  delete process.env.ENVBEAM_AGE_PUBLIC_KEY;
+  delete process.env.ENVBEAM_AGE_PRIVATE_KEY;
   while (cleanups.length) await cleanups.pop()!();
 });
 
 function baseRunner(over: { dirty?: string[]; psqlRows?: () => string } = {}): FakeRunner {
-  const r = new FakeRunner({ available: ['git', 'doppler', 'docker', 'pg_dump', 'psql', 'claude-sync'] });
+  const r = new FakeRunner({ available: ['git', 'doppler', 'docker', 'pg_dump', 'psql', 'claude-sync', 'age'] });
+  // fake age: encrypt copies in→out; decrypt copies out→in (synchronously).
+  r.on('age', (_c, a) => {
+    const o = a.indexOf('-o');
+    if (o < 0) return { stdout: 'age 1.0' }; // --version probe
+    copyFileSync(a[a.length - 1]!, a[o + 1]!);
+    return {};
+  });
   r.on((c, a) => a[0] === '--version', { stdout: 'v1' });
   // catch-all git registered first so specific git stubs below take precedence
   r.on('git', {});

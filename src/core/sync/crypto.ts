@@ -12,8 +12,8 @@ import { getGlobalEncryptionConfig, injectEncryptionEnv } from '../storage/globa
  * extension suffix to append to the uploaded name.
  */
 export function encryptionSuffix(cfg: SyncConfig | undefined): string {
-  if (!cfg || cfg.encrypt === 'none') return '';
-  return cfg.encrypt === 'age' ? '.age' : '.gpg';
+  if (!cfg) return '';
+  return cfg.encrypt === 'gpg' ? '.gpg' : '.age';
 }
 
 /** Encryption implied by a stored file's extension (source of truth on restore). */
@@ -114,6 +114,6 @@ export async function decryptFile(
 }
 
 export function requiredCryptoTools(cfg: SyncConfig | undefined): string[] {
-  if (!cfg || cfg.encrypt === 'none') return [];
+  if (!cfg) return [];
   return [cfg.encrypt];
 }

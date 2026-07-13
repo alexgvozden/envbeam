@@ -37,7 +37,7 @@ export function resolveActiveProviders(ctx: RunContext): ActiveProviders {
   }
 
   let session: SessionProvider | undefined;
-  const sessionProvider = config.session?.provider ?? 'claude-sync';
+  const sessionProvider = config.session?.provider ?? 'claude-native';
   if (sessionProvider && sessionProvider !== 'none') {
     session = registry.create('session', sessionProvider) as SessionProvider;
   }

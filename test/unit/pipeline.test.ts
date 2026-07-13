@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import path from 'node:path';
-import { promises as fs } from 'node:fs';
+import { promises as fs, copyFileSync } from 'node:fs';
 import { runResume } from '../../src/core/pipeline/resume.js';
 import { runPause } from '../../src/core/pipeline/pause.js';
 import { runStatus } from '../../src/core/pipeline/status.js';
@@ -21,21 +21,33 @@ beforeEach(async () => {
   envbeamHome = dir;
   process.env.ENVBEAM_HOME = dir;
   process.env.ENVBEAM_MACHINE = 'testbox';
+  // Snapshot at-rest encryption is required — provide test age keys.
+  process.env.ENVBEAM_AGE_PUBLIC_KEY = 'age1testpub';
+  process.env.ENVBEAM_AGE_PRIVATE_KEY = 'AGE-SECRET-KEY-test';
   cleanups.push(cleanup);
 });
 afterEach(async () => {
   delete process.env.ENVBEAM_HOME;
   delete process.env.ENVBEAM_MACHINE;
+  delete process.env.ENVBEAM_AGE_PUBLIC_KEY;
+  delete process.env.ENVBEAM_AGE_PRIVATE_KEY;
   while (cleanups.length) await cleanups.pop()!();
 });
 
 /** A FakeRunner scripted for a healthy machine. */
 function happyRunner(opts: { dirty?: string[]; behind?: number; noDbTools?: boolean } = {}): FakeRunner {
-  const avail = ['git', 'doppler', 'docker', 'claude-sync'];
+  const avail = ['git', 'doppler', 'docker', 'claude-sync', 'age'];
   if (!opts.noDbTools) avail.push('pg_dump', 'psql');
   const runner = new FakeRunner({ available: avail });
   // versions
   runner.on((c, a) => a[0] === '--version', { stdout: 'tool 1.0.0' });
+  // fake age: encrypt copies in→out; decrypt copies out→in.
+  runner.on('age', (_c, a) => {
+    const o = a.indexOf('-o');
+    if (o < 0) return { stdout: 'age 1.0' };
+    copyFileSync(a[a.length - 1]!, a[o + 1]!);
+    return {};
+  });
   // git
   runner.on('git branch --show-current', { stdout: 'main\n' });
   runner.on('git status --porcelain', { stdout: (opts.dirty ?? []).map((f) => ` M ${f}`).join('\n') });

@@ -16,6 +16,7 @@ import {
   detectEncryptFromName,
   ensureAgeKeys,
   formatTimestamp,
+  requiredCryptoTools,
   verifyArtifact,
   type SnapshotEntry,
 } from '../sync/index.js';
@@ -78,12 +79,18 @@ export async function runResume(ctx: RunContext): Promise<ResumeReport> {
   if (!ctx.dryRun) await assertSecretsAuth(ctx);
 
   // Per project rule, install missing DB client tools for the user (snapshot
-  // restore needs them) rather than letting preflight hard-block.
+  // restore needs them) rather than letting preflight hard-block. The crypto
+  // tool (age/gpg) belongs here too: at-rest encryption is required, so a
+  // snapshot restore always needs it — auto-install it instead of dead-ending
+  // at preflight.
   if (!ctx.dryRun && ctx.config.database?.mode === 'snapshot' && active.database) {
     const dctx = ctx.providerCtx('database');
     const missing: string[] = [];
     for (const req of active.database.requiredTools(dctx)) {
       if (!(await ctx.runner.which(req.command))) missing.push(req.command);
+    }
+    for (const cmd of requiredCryptoTools(ctx.config.database.sync)) {
+      if (!(await ctx.runner.which(cmd))) missing.push(cmd);
     }
     if (missing.length) {
       log.sub(`database tools needed — installing ${missing.join(', ')}`);
